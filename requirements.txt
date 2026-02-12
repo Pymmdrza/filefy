@@ -1,5 +1,5 @@
 # filefy - Web-Based File Manager
 
-Flask>=3.1.2
-Werkzeug>=3.1.5
-requests>=2.32.5
+Flask>=2.3.0
+Werkzeug>=2.3.0
+requests>=2.28.0

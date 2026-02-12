@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "A professional web-based file manager with dark theme UI"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [
     {name = "Mmdrza", email = "pymmdrza@gmail.com"}
 ]
@@ -33,21 +33,19 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
     "Topic :: System :: Filesystems",
     "Topic :: Utilities"
 ]
 dependencies = [
-    "Flask>=3.1.2",
-    "Werkzeug>=3.1.5",
-    "requests>=2.32.5"
+    "Flask>=2.3.0",
+    "Werkzeug>=2.3.0",
+    "requests>=2.28.0"
 ]
 
 [project.optional-dependencies]
