@@ -1,0 +1,9 @@
+{
+  "configFiles": {
+    "settings": "settings.json",
+    "security": "security.json",
+    "details": "details.json",
+    "build": "build.json"
+  },
+  "environment": "development"
+}

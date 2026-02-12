@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "filefy"
+version = "1.0.0"
+description = "A professional web-based file manager with dark theme UI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "Mmdrza", email = "pymmdrza@gmail.com"}
+]
+
+keywords = [
+    "file-manager",
+    "web-file-manager", 
+    "flask",
+    "file-browser",
+    "remote-download",
+    "file-upload",
+    "dark-theme",
+    "file-explorer"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Web Environment",
+    "Framework :: Flask",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities"
+]
+dependencies = [
+    "Flask>=3.1.2",
+    "Werkzeug>=3.1.5",
+    "requests>=2.32.5"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "build>=0.10.0",
+    "twine>=4.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/Pymmdrza/filefy"
+Documentation = "https://github.com/Pymmdrza/filefy#readme"
+Repository = "https://github.com/Pymmdrza/filefy.git"
+Issues = "https://github.com/Pymmdrza/filefy/issues"
+Changelog = "https://github.com/Pymmdrza/filefy/releases"
+
+[project.scripts]
+filefy = "filefy.cli:main"
+
+[tool.setuptools]
+packages = ["filefy"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+filefy = [
+    "templates/*.html",
+    "templates/**/*.html",
+    "static/css/*.css",
+    "static/js/*.js",
+    "static/img/*",
+    "static/**/*"
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.venv
+    | build
+    | dist
+    | \.eggs
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

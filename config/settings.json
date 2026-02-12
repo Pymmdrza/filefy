@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "network": {
+      "host": "0.0.0.0",
+      "port": 5000
+    },
+    "fileManager": {
+      "rootDirectory": "~",
+      "maxUploadSize": 10737418240,
+      "allowedExtensions": ["*"]
+    },
+    "logging": {
+      "level": "INFO",
+      "path": "logs/app.log",
+      "format": "%(asctime)s [%(levelname)s] : %(message)s"
+    },
+    "permissions": {
+      "read": true,
+      "write": true,
+      "delete": false
+    }
+  }
+}

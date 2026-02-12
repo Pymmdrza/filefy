@@ -1,0 +1,7 @@
+{
+  "setup": {"path": "setup.py"},
+  "requirements": {"path": "requirements.txt"},
+  "project": {"path": "pyproject.toml"},
+  "readme": {"path": "README.md"},
+  "license": {"path": "LICENSE"}
+}

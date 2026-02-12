@@ -1,0 +1,9 @@
+{
+  "appName": "FileFy",
+  "version": "1.0.0",
+  "programmer": "Mmdrza <github.com/Pymmdrza>",
+  "email": "pymmdrza@gmail.com",
+  "license": "MIT",
+  "description": "A simple file manager built with Flask and JavaScript.",
+  "repository": "https://github.com/Pymmdrza/filefy"
+}
