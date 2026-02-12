@@ -1,0 +1,28 @@
+site_name: FileFy
+site_author: 'Pymmdrza@gmail.com'
+repo_url: 'https://github.com/pymmdrza/filefy'
+edit_uri: 'root/main/docs/'
+site_description: 'FileFy Modern Flask File Manager.'
+site_url: !ENV READTHEDOCS_CANONICAL_URL
+copyright: 'Copyright © 2026, Pymmdrza'
+
+
+theme:
+  name: readthedocs
+  locale: en
+  collapse_by_default: false
+  include_homepage_in_sidebar: true
+  features:
+    - navigation.tabs
+    - navigation.instant
+
+plugins:
+  - search:
+      indexing: 'full'
+
+markdown_extensions:
+  - smarty
+  - toc:
+      permalink: true
+      separator: "-"
+  - sane_lists
