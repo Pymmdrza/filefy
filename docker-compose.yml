@@ -2,6 +2,12 @@
 # Usage:
 #   docker compose up -d           # build & run locally
 #   docker compose pull && docker compose up -d   # pull prebuilt image from GHCR
+#
+# The container exposes /data as the managed "Home" directory (controlled by
+# the FILEFY_DIR environment variable). Mount any host folder you want filefy
+# to manage onto /data, and it will appear at the top of the sidebar's
+# "Quick Access" panel together with any other locations that exist inside
+# the container (e.g. extra mounts under /mnt or /media that you add below).
 
 services:
   filefy:
@@ -17,7 +23,16 @@ services:
     environment:
       FILEFY_HOST: "0.0.0.0"
       FILEFY_PORT: "5000"
+      # Directory that becomes the sidebar "Home". Change this if you mount
+      # the host volume somewhere else (e.g. FILEFY_DIR: "/mnt/host").
       FILEFY_DIR: "/data"
     volumes:
-      # Mount the directory you want to manage into the container's /data
+      # Primary managed directory: replace ./data with any host path you
+      # want filefy to read from / write to (uploads, remote downloads, etc.)
       - ./data:/data
+      # Optional: expose extra host locations as additional Quick Access
+      # entries. They will show up automatically because they live under
+      # /mnt or /media inside the container.
+      # - /home/youruser/Downloads:/mnt/downloads
+      # - /home/youruser/Documents:/mnt/documents
+      # - /media/usb-stick:/media/usb-stick:ro

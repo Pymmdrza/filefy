@@ -64,6 +64,7 @@ class TestFlaskApp:
         assert "/api/upload" in routes
         assert "/api/download/<path:file_path>" in routes
         assert "/api/remote-download" in routes
+        assert "/api/quick-access" in routes
 
 
 class TestAPIEndpoints:
@@ -187,3 +188,43 @@ class TestRemoteDownload:
             },
         )
         assert response.status_code == 400
+
+
+class TestQuickAccess:
+    """Test the dynamic Quick Access endpoint."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_quick_access_endpoint(self, client):
+        """The endpoint must report a home directory and a list of items."""
+        response = client.get("/api/quick-access")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "home" in data
+        assert "items" in data
+        assert isinstance(data["items"], list)
+        # All returned shortcuts must point at directories that actually
+        # exist on the host - never at hardcoded paths from the developer's
+        # machine.
+        for item in data["items"]:
+            assert "label" in item
+            assert "path" in item
+            assert "icon" in item
+            assert os.path.isdir(item["path"]), (
+                f"Quick Access entry {item['label']!r} -> {item['path']!r} "
+                "does not exist on this host"
+            )
+
+    def test_quick_access_includes_home(self, client):
+        """The configured base/home directory must be among the shortcuts."""
+        response = client.get("/api/quick-access")
+        data = response.get_json()
+        paths = {item["path"] for item in data["items"]}
+        assert os.path.abspath(os.path.expanduser(data["home"])) in paths
+
