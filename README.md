@@ -73,6 +73,53 @@ pip install -e .
 pipx install filefy
 ```
 
+### Method 4: Docker (GitHub Container Registry)
+
+Pre-built multi-arch (`linux/amd64`, `linux/arm64`) images are published on every
+push to the default branch and on every `v*` tag at
+[`ghcr.io/pymmdrza/filefy`](https://github.com/Pymmdrza/filefy/pkgs/container/filefy).
+
+```bash
+# Pull and run the latest image, mounting the host directory you want to manage
+docker run -d \
+  --name filefy \
+  -p 5000:5000 \
+  -v "$PWD/data:/data" \
+  ghcr.io/pymmdrza/filefy:latest
+```
+
+Open <http://localhost:5000> to use the file manager. The container exposes the
+following environment variables (all optional):
+
+| Variable      | Default     | Description                              |
+|---------------|-------------|------------------------------------------|
+| `FILEFY_HOST` | `0.0.0.0`   | Interface to bind the server to          |
+| `FILEFY_PORT` | `5000`      | Port to listen on (inside the container) |
+| `FILEFY_DIR`  | `/data`     | Base directory exposed by the manager    |
+
+Pin a specific version by tag, e.g. `ghcr.io/pymmdrza/filefy:v1.0.0`.
+
+#### Docker Compose
+
+A ready-to-use `docker-compose.yml` is included:
+
+```bash
+docker compose up -d
+```
+
+This will mount `./data` into the container and expose the UI on
+<http://localhost:5000>. Replace the `image:` line with `build: .` to build the
+image locally from the source tree instead of pulling from GHCR.
+
+#### Build the image yourself
+
+```bash
+git clone https://github.com/Pymmdrza/filefy.git
+cd filefy
+docker build -t filefy:local .
+docker run --rm -p 5000:5000 -v "$PWD/data:/data" filefy:local
+```
+
 ## CLI Usage
 
 ```

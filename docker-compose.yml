@@ -1,0 +1,23 @@
+# Docker Compose configuration for filefy
+# Usage:
+#   docker compose up -d           # build & run locally
+#   docker compose pull && docker compose up -d   # pull prebuilt image from GHCR
+
+services:
+  filefy:
+    # Use the prebuilt GHCR image by default; override with `build: .` for local builds.
+    image: ghcr.io/pymmdrza/filefy:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: filefy
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      FILEFY_HOST: "0.0.0.0"
+      FILEFY_PORT: "5000"
+      FILEFY_DIR: "/data"
+    volumes:
+      # Mount the directory you want to manage into the container's /data
+      - ./data:/data
