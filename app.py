@@ -9,6 +9,7 @@ Features:
 
 import os
 import shutil
+import string
 import threading
 import time
 import uuid
@@ -154,6 +155,74 @@ def get_file_icon(file_path, is_dir):
         ".gz": "fa-file-archive",
     }
     return icons.get(ext, "fa-file")
+
+
+def build_quick_access():
+    """Build the list of Quick Access shortcuts based on what actually exists
+    on the host this server is running on (Linux, macOS, Windows or Docker).
+
+    The first entry is always the configured base directory (the user's data
+    root, e.g. ``/data`` in Docker, or ``$HOME`` on a normal install). Then
+    we add the standard XDG-style user folders that exist, the filesystem
+    root, ``/tmp``, any mountpoints under ``/mnt`` and ``/media`` (Linux),
+    and Windows drive letters when running on Windows.
+    """
+    items = []
+    seen = set()
+
+    def _add(label, path, icon):
+        try:
+            if not path:
+                return
+            normalized = os.path.abspath(os.path.expanduser(path))
+            if normalized in seen:
+                return
+            if not os.path.isdir(normalized):
+                return
+            seen.add(normalized)
+            items.append({"label": label, "path": normalized, "icon": icon})
+        except (OSError, ValueError):
+            return
+
+    # 1. The configured base/data directory (what Docker users mount as /data).
+    _add("Home", BASE_DIR, "fa-home")
+
+    # 2. Standard user folders relative to the real user home (if different).
+    user_home = os.path.expanduser("~")
+    standard_dirs = [
+        ("User Home", user_home, "fa-user"),
+        ("Desktop", os.path.join(user_home, "Desktop"), "fa-desktop"),
+        ("Documents", os.path.join(user_home, "Documents"), "fa-file-alt"),
+        ("Downloads", os.path.join(user_home, "Downloads"), "fa-download"),
+        ("Pictures", os.path.join(user_home, "Pictures"), "fa-image"),
+        ("Music", os.path.join(user_home, "Music"), "fa-music"),
+        ("Videos", os.path.join(user_home, "Videos"), "fa-video"),
+    ]
+    for label, path, icon in standard_dirs:
+        _add(label, path, icon)
+
+    # 3. Filesystem root and temp.
+    if os.name == "nt":
+        # On Windows expose every available drive letter.
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            _add(f"Drive {letter}:", drive, "fa-hdd")
+    else:
+        _add("Root", "/", "fa-hdd")
+        _add("Temp", "/tmp", "fa-clock")
+
+        # 4. Mountpoints commonly used for external drives / volumes.
+        for parent in ("/mnt", "/media", "/Volumes"):
+            try:
+                if os.path.isdir(parent):
+                    for entry in sorted(os.listdir(parent)):
+                        full = os.path.join(parent, entry)
+                        if os.path.isdir(full):
+                            _add(entry, full, "fa-hdd")
+            except (OSError, PermissionError):
+                continue
+
+    return items
 
 
 def remote_download_task(task_id, url, destination_path):
@@ -714,6 +783,17 @@ def search():
         return jsonify({"query": query, "results": results, "total": len(results)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/quick-access")
+def quick_access():
+    """Return the dynamic Quick Access shortcuts for the host system."""
+    return jsonify(
+        {
+            "home": BASE_DIR,
+            "items": build_quick_access(),
+        }
+    )
 
 
 @app.route("/api/disk-usage")

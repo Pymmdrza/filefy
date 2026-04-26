@@ -31,8 +31,12 @@ const elements = {
     diskUsed: document.getElementById('diskUsed'),
     diskTotal: document.getElementById('diskTotal'),
     loadingOverlay: document.getElementById('loadingOverlay'),
-    toastContainer: document.getElementById('toastContainer')
+    toastContainer: document.getElementById('toastContainer'),
+    quickLinks: document.getElementById('quickLinks')
 };
+
+// Server-reported home/base directory (set after /api/quick-access loads)
+let serverHome = null;
 
 // Initialize Application
 document.addEventListener('DOMContentLoaded', () => {
@@ -40,27 +44,79 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function init() {
-    // Load initial directory
-    browseDirectory('~');
-    
+    // Load Quick Access shortcuts dynamically from the host system,
+    // then start browsing the server-reported base directory. This makes
+    // the sidebar reflect the *actual* machine (or Docker mount) rather
+    // than relying on hardcoded paths.
+    loadQuickAccess();
+
     // Load disk usage
     loadDiskUsage();
-    
+
     // Start download progress monitoring
     setInterval(updateDownloadProgress, 1000);
-    
+
     // Setup event listeners
     setupEventListeners();
 }
 
+// Load Quick Access shortcuts from the server and render them in the sidebar
+async function loadQuickAccess() {
+    try {
+        const response = await fetch('/api/quick-access');
+        const data = await response.json();
+
+        if (response.ok) {
+            serverHome = data.home || null;
+            renderQuickAccess(data.items || []);
+        } else {
+            console.error('Failed to load quick access:', data);
+        }
+    } catch (error) {
+        console.error('Quick access network error:', error);
+    } finally {
+        // Whether or not the sidebar loaded, always navigate to a sensible
+        // starting directory (the server's base dir, or "~" as a fallback).
+        browseDirectory(serverHome || '~');
+    }
+}
+
+function renderQuickAccess(items) {
+    if (!elements.quickLinks) return;
+
+    if (!items.length) {
+        elements.quickLinks.innerHTML =
+            '<li class="quick-empty" style="cursor:default;opacity:0.6;">No locations available</li>';
+        return;
+    }
+
+    elements.quickLinks.innerHTML = items.map(item => `
+        <li data-path="${escapeHtml(item.path)}" title="${escapeHtml(item.path)}">
+            <i class="fas ${sanitizeIconClass(item.icon)}"></i>
+            ${escapeHtml(item.label)}
+        </li>
+    `).join('');
+}
+
+// Restrict icon strings to a safe FontAwesome-style class token so they can
+// be inserted into the class attribute without HTML-escaping (which would
+// break the CSS selector) while still rejecting anything unexpected.
+function sanitizeIconClass(icon) {
+    if (typeof icon !== 'string') return 'fa-folder';
+    return /^fa-[a-z0-9]+(-[a-z0-9]+)*$/i.test(icon) ? icon : 'fa-folder';
+}
+
 // Event Listeners Setup
 function setupEventListeners() {
-    // Quick links in sidebar
-    document.querySelectorAll('.quick-links li').forEach(item => {
-        item.addEventListener('click', () => {
-            browseDirectory(item.dataset.path);
+    // Quick links in sidebar (event delegation since items are loaded dynamically)
+    if (elements.quickLinks) {
+        elements.quickLinks.addEventListener('click', (e) => {
+            const li = e.target.closest('li[data-path]');
+            if (li) {
+                browseDirectory(li.dataset.path);
+            }
         });
-    });
+    }
 
     // Refresh button
     document.getElementById('refreshBtn').addEventListener('click', () => {
@@ -96,7 +152,10 @@ function setupEventListeners() {
     document.getElementById('newRemoteDownload').addEventListener('click', () => {
         openModal('remoteDownloadModal');
         document.getElementById('downloadUrl').value = '';
-        document.getElementById('downloadDestination').textContent = state.currentPath;
+        // Show the actual destination so the user knows exactly where the
+        // file will be saved (the folder they are currently browsing).
+        const dest = state.currentPath || serverHome || '~';
+        document.getElementById('downloadDestination').textContent = dest;
     });
 
     // Upload zone interactions
@@ -977,7 +1036,7 @@ async function startRemoteDownload() {
         return;
     }
 
-    const destination = state.currentPath || '~';
+    const destination = state.currentPath || serverHome || '~';
     console.log('Starting remote download:', { url, destination });
     
     showLoading();
