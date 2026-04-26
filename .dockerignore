@@ -1,0 +1,50 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# CI / docs / dev meta
+.github
+.idea
+.vscode
+*.md
+!README.md
+
+# Python build / cache artifacts
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+build
+dist
+sdist
+develop-eggs
+.eggs
+pip-wheel-metadata
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+# Tests / coverage
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+tests
+
+# Misc
+.DS_Store
+*.log
+uploads
+.env
+.env.local
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
