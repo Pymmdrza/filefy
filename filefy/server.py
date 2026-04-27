@@ -26,9 +26,6 @@ from flask import (
     request,
     jsonify,
     send_file,
-    abort,
-    Response,
-    stream_with_context,
 )
 from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
@@ -42,7 +39,7 @@ sys.path.insert(0, str(BASE_DIR_PATH))
 
 # Import configuration manager
 try:
-    from config import config_manager, get_settings, get_security, get_details
+    from config import config_manager, get_settings, get_details
 
     CONFIG_AVAILABLE = True
 except ImportError:
@@ -145,7 +142,7 @@ def get_file_info(file_path):
             "permissions": oct(stat.st_mode)[-3:],
             "icon": get_file_icon(file_path, is_dir),
         }
-    except (OSError, PermissionError) as e:
+    except (OSError, PermissionError):
         return None
 
 
@@ -1087,10 +1084,10 @@ def run(host=None, port=None, debug=False, base_dir=None):
 
     print()
     print("\033[1;36m" + "=" * 55 + "\033[0m")
-    print(f"\033[1;36m   📁 {app_name} v{version} - Web-Based File Manager\033[0m")
+    print(f"\033[1;36m   {app_name} v{version} - Web-Based File Manager\033[0m")
     print("\033[1;36m" + "=" * 55 + "\033[0m")
-    print(f"\033[1;33m   📂 Base Directory:\033[0m {BASE_DIR}")
-    print(f"\033[1;33m   🌐 Server URL:\033[0m http://{host}:{port}")
+    print(f"\033[1;33m   Base Directory:\033[0m {BASE_DIR}")
+    print(f"\033[1;33m   Server URL:\033[0m http://{host}:{port}")
     print("\033[1;36m" + "=" * 55 + "\033[0m")
     print()
 

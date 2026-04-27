@@ -12,6 +12,7 @@ Usage:
 """
 
 import sys
+from importlib import import_module
 from pathlib import Path
 
 # Add parent directory to path for config imports
@@ -21,6 +22,7 @@ sys.path.insert(0, str(BASE_DIR))
 # Try to get version from config
 try:
     from config import get_details
+
     _details = get_details()
     __version__ = _details.version
     __author__ = _details.programmer
@@ -32,6 +34,8 @@ except ImportError:
 
 __license__ = "MIT"
 
-from .server import app, create_app
+_server = import_module(".server", __name__)
+app = _server.app
+create_app = _server.create_app
 
 __all__ = ["app", "create_app", "__version__"]

@@ -30,6 +30,11 @@ const elements = {
     diskProgressBar: document.getElementById('diskProgressBar'),
     diskUsed: document.getElementById('diskUsed'),
     diskTotal: document.getElementById('diskTotal'),
+    opState: document.getElementById('opState'),
+    opQueue: document.getElementById('opQueue'),
+    opStorage: document.getElementById('opStorage'),
+    opPath: document.getElementById('opPath'),
+    opClock: document.getElementById('opClock'),
     loadingOverlay: document.getElementById('loadingOverlay'),
     toastContainer: document.getElementById('toastContainer'),
     quickLinks: document.getElementById('quickLinks')
@@ -55,6 +60,8 @@ function init() {
 
     // Start download progress monitoring
     setInterval(updateDownloadProgress, 1000);
+    setInterval(updateOperationsClock, 1000);
+    updateOperationsClock();
 
     // Setup event listeners
     setupEventListeners();
@@ -327,6 +334,7 @@ async function browseDirectory(path) {
             renderFileList(data.items);
             elements.itemCount.textContent = `${data.total_items} items`;
             elements.statusText.textContent = 'Ready';
+            updateOperationsPath(data.current_path);
         } else {
             showToast(data.error || 'Failed to browse directory', 'error');
         }
@@ -1097,6 +1105,13 @@ async function updateDownloadProgress() {
             console.error('Download tasks response is not an array:', tasks);
             return;
         }
+
+        if (elements.opQueue) {
+            const activeCount = tasks.filter(task =>
+                ['pending', 'downloading', 'cancelling'].includes(task.status)
+            ).length;
+            elements.opQueue.textContent = `${activeCount} active`;
+        }
         
         let html = '';
         tasks.forEach(task => {
@@ -1201,10 +1216,26 @@ async function loadDiskUsage() {
             elements.diskProgressBar.style.width = `${data.percent_used}%`;
             elements.diskUsed.textContent = data.used_formatted;
             elements.diskTotal.textContent = data.total_formatted;
+            if (elements.opStorage) {
+                elements.opStorage.textContent = `${Math.round(data.percent_used)}% used`;
+            }
         }
     } catch (error) {
         console.error('Failed to load disk usage:', error);
     }
+}
+
+function updateOperationsClock() {
+    if (!elements.opClock) return;
+
+    const time = new Date().toISOString().slice(11, 19);
+    elements.opClock.textContent = `UTC ${time}`;
+}
+
+function updateOperationsPath(path) {
+    if (!elements.opPath) return;
+
+    elements.opPath.textContent = `Path: ${path || 'pending'}`;
 }
 
 // Modal Helpers
