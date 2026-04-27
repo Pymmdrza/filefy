@@ -54,22 +54,6 @@ body {
     overflow: hidden;
 }
 
-body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    background: repeating-linear-gradient(
-        to bottom,
-        rgba(255, 255, 255, 0.025) 0,
-        rgba(255, 255, 255, 0.025) 1px,
-        transparent 1px,
-        transparent 4px
-    );
-    opacity: 0.35;
-    z-index: 9999;
-}
-
 /* Scrollbars */
 ::-webkit-scrollbar {
     width: 8px;

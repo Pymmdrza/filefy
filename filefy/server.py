@@ -306,7 +306,7 @@ def split_download_urls(value):
     else:
         raw_urls = str(value or "").replace(",", "\n").splitlines()
 
-    urls = [url.strip() for url in raw_urls if str(url).strip()]
+    urls = [url for url in (str(url).strip() for url in raw_urls) if url]
     return urls[:DOWNLOAD_MAX_BATCH], len(urls) > DOWNLOAD_MAX_BATCH
 
 
@@ -437,7 +437,7 @@ def remote_download_task(task_id, url, destination_path):
 
                     progress = 0
                     if total_size > 0:
-                        # Reserve 100% for the final atomic file replacement.
+                        # Cap progress until atomic file replacement completes.
                         progress = min((downloaded / total_size) * 100, 99.9)
 
                     update_download_task(
