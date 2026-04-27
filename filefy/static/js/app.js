@@ -1117,7 +1117,7 @@ async function updateDownloadProgress() {
         tasks.forEach(task => {
             const statusClass = task.status || 'pending';
             const progress = task.progress || 0;
-            const filename = task.filename || 'Preparing download...';
+            const filename = task.filename || 'Initializing...';
             const url = task.url || '';
             
             html += `
