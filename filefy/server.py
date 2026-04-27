@@ -95,6 +95,11 @@ download_tasks_lock = threading.RLock()
 DOWNLOAD_CHUNK_SIZE = 1024 * 256
 DOWNLOAD_TIMEOUT = (10, 15)
 DOWNLOAD_MAX_BATCH = 20
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def get_safe_path(path):
@@ -386,9 +391,8 @@ def remote_download_task(task_id, url, destination_path):
         )
 
         # Start the download with headers to mimic browser
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " "AppleWebKit/537.36"
         headers = {
-            "User-Agent": user_agent,
+            "User-Agent": DOWNLOAD_USER_AGENT,
         }
         response = requests.get(
             url,
@@ -437,7 +441,7 @@ def remote_download_task(task_id, url, destination_path):
 
                     progress = 0
                     if total_size > 0:
-                        # Cap progress until atomic file replacement completes.
+                        # Keep 100% reserved for the final atomic rename step.
                         progress = min((downloaded / total_size) * 100, 99.9)
 
                     update_download_task(
