@@ -379,14 +379,23 @@ def remote_download_task(task_id, url, destination_path):
     file_path = None
     partial_path = None
     try:
-        update_download_task(task_id, status="downloading", started_at=time.time())
+        update_download_task(
+            task_id,
+            status="downloading",
+            started_at=time.time(),
+        )
 
         # Start the download with headers to mimic browser
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " "AppleWebKit/537.36"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": user_agent,
         }
         response = requests.get(
-            url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers, verify=True
+            url,
+            stream=True,
+            timeout=DOWNLOAD_TIMEOUT,
+            headers=headers,
+            verify=True,
         )
         response.raise_for_status()
 

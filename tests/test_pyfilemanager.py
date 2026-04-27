@@ -203,9 +203,12 @@ class TestRemoteDownload:
         """Test starting multiple remote downloads in one request"""
         import filefy.server as server
 
+        def skip_download(*args):
+            return None
+
         with tempfile.TemporaryDirectory() as tmpdir:
             server.download_tasks.clear()
-            monkeypatch.setattr(server, "remote_download_task", lambda *args: None)
+            monkeypatch.setattr(server, "remote_download_task", skip_download)
 
             response = client.post(
                 "/api/remote-download",
