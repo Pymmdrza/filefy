@@ -92,6 +92,7 @@ download_tasks_lock = threading.RLock()
 DOWNLOAD_CHUNK_SIZE = 1024 * 256
 DOWNLOAD_TIMEOUT = (10, 15)
 DOWNLOAD_MAX_BATCH = 20
+MAX_DOWNLOAD_PROGRESS_BEFORE_COMPLETE = 99.9
 DOWNLOAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -439,7 +440,10 @@ def remote_download_task(task_id, url, destination_path):
                     progress = 0
                     if total_size > 0:
                         # Keep 100% reserved for the final atomic rename step.
-                        progress = min((downloaded / total_size) * 100, 99.9)
+                        progress = min(
+                            (downloaded / total_size) * 100,
+                            MAX_DOWNLOAD_PROGRESS_BEFORE_COMPLETE,
+                        )
 
                     update_download_task(
                         task_id,

@@ -5,6 +5,7 @@ Tests for filefy
 import pytest
 import os
 import tempfile
+from pathlib import Path
 
 
 class TestPackageImports:
@@ -228,6 +229,33 @@ class TestRemoteDownload:
             assert len(server.download_tasks) == 2
             server.download_tasks.clear()
 
+    def test_remote_download_accepts_comma_separated_urls(self, client, monkeypatch):
+        """Test comma-separated URLs match the client-side splitter behavior"""
+        import filefy.server as server
+
+        def skip_download(*args):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.download_tasks.clear()
+            monkeypatch.setattr(server, "remote_download_task", skip_download)
+
+            response = client.post(
+                "/api/remote-download",
+                json={
+                    "url": (
+                        "https://example.com/one.txt," "https://example.com/two.txt"
+                    ),
+                    "destination": tmpdir,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.get_json()
+            assert data["count"] == 2
+            assert len(data["task_ids"]) == 2
+            server.download_tasks.clear()
+
     def test_cancel_download_marks_active_task(self, client):
         """Test cancelling an active download marks it for cleanup"""
         import filefy.server as server
@@ -260,8 +288,8 @@ class TestRemoteDownload:
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = os.path.join(tmpdir, "file.txt")
             partial_path = os.path.join(tmpdir, "file.txt.part")
-            open(file_path, "w").close()
-            open(partial_path, "w").close()
+            Path(file_path).touch()
+            Path(partial_path).touch()
             server.download_tasks[task_id] = {
                 "id": task_id,
                 "status": "downloading",
