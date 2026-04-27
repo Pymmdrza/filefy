@@ -12,7 +12,6 @@ Usage:
 """
 
 import sys
-from importlib import import_module
 from pathlib import Path
 
 # Add parent directory to path for config imports
@@ -34,8 +33,6 @@ except ImportError:
 
 __license__ = "MIT"
 
-_server = import_module(".server", __name__)
-app = _server.app
-create_app = _server.create_app
+from .server import app, create_app  # noqa: E402
 
 __all__ = ["app", "create_app", "__version__"]
