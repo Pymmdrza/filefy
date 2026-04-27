@@ -407,7 +407,7 @@ def remote_download_task(task_id, url, destination_path):
         total_size = int(response.headers.get("content-length", 0))
         filename = get_download_filename(url, response)
         file_path = reserve_download_path(destination_path, filename)
-        partial_path = f"{file_path}.download-{task_id}.part"
+        partial_path = f"{file_path}.part"
 
         update_download_task(
             task_id,
@@ -437,6 +437,7 @@ def remote_download_task(task_id, url, destination_path):
 
                     progress = 0
                     if total_size > 0:
+                        # Reserve 100% for the final atomic file replacement.
                         progress = min((downloaded / total_size) * 100, 99.9)
 
                     update_download_task(
