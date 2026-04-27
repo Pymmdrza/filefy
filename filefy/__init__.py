@@ -21,6 +21,7 @@ sys.path.insert(0, str(BASE_DIR))
 # Try to get version from config
 try:
     from config import get_details
+
     _details = get_details()
     __version__ = _details.version
     __author__ = _details.programmer
@@ -32,6 +33,6 @@ except ImportError:
 
 __license__ = "MIT"
 
-from .server import app, create_app
+from .server import app, create_app  # noqa: E402
 
 __all__ = ["app", "create_app", "__version__"]

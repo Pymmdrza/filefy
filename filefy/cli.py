@@ -21,6 +21,7 @@ sys.path.insert(0, str(BASE_DIR))
 # Import configuration
 try:
     from config import get_settings, get_details
+
     CONFIG_AVAILABLE = True
 except ImportError:
     CONFIG_AVAILABLE = False
@@ -44,7 +45,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="filefy",
-        description="🗂️  Filefy - Professional Web-Based File Manager",
+        description="Filefy - Professional Web-Based File Manager",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -84,21 +85,35 @@ Visit https://github.com/Pymmdrza/filefy for more information.
         help="Base directory for file management (default: home directory)",
     )
 
-    parser.add_argument("--debug", action="store_true", help="Enable Flask debug mode")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable Flask debug mode",
+    )
 
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {version}")
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {version}",
+    )
 
     args = parser.parse_args()
 
     try:
         from .server import run
 
-        run(host=args.host, port=args.port, debug=args.debug, base_dir=args.directory)
+        run(
+            host=args.host,
+            port=args.port,
+            debug=args.debug,
+            base_dir=args.directory,
+        )
     except KeyboardInterrupt:
-        print("\n\n👋 Filefy stopped. Goodbye!")
+        print("\n\nFilefy stopped. Goodbye!")
         sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Error: {e}", file=sys.stderr)
+        print(f"\nError: {e}", file=sys.stderr)
         sys.exit(1)
 
 

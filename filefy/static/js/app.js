@@ -30,6 +30,11 @@ const elements = {
     diskProgressBar: document.getElementById('diskProgressBar'),
     diskUsed: document.getElementById('diskUsed'),
     diskTotal: document.getElementById('diskTotal'),
+    opState: document.getElementById('opState'),
+    opQueue: document.getElementById('opQueue'),
+    opStorage: document.getElementById('opStorage'),
+    opPath: document.getElementById('opPath'),
+    opClock: document.getElementById('opClock'),
     loadingOverlay: document.getElementById('loadingOverlay'),
     toastContainer: document.getElementById('toastContainer'),
     quickLinks: document.getElementById('quickLinks')
@@ -55,6 +60,8 @@ function init() {
 
     // Start download progress monitoring
     setInterval(updateDownloadProgress, 1000);
+    setInterval(updateOperationsClock, 1000);
+    updateOperationsClock();
 
     // Setup event listeners
     setupEventListeners();
@@ -327,6 +334,7 @@ async function browseDirectory(path) {
             renderFileList(data.items);
             elements.itemCount.textContent = `${data.total_items} items`;
             elements.statusText.textContent = 'Ready';
+            updateOperationsPath(data.current_path);
         } else {
             showToast(data.error || 'Failed to browse directory', 'error');
         }
@@ -1022,22 +1030,32 @@ async function previewFile(path) {
 
 // Remote Download
 async function startRemoteDownload() {
-    const url = document.getElementById('downloadUrl').value.trim();
-    if (!url) {
-        showToast('Please enter a URL', 'warning');
+    const rawUrls = document.getElementById('downloadUrl').value.trim();
+    const urls = rawUrls
+        .split(/\r?\n|,/)
+        .map(url => url.trim())
+        .filter(Boolean);
+
+    if (!urls.length) {
+        showToast('Please enter at least one URL', 'warning');
         return;
     }
 
     // Validate URL format
-    try {
-        new URL(url);
-    } catch (e) {
-        showToast('Invalid URL format', 'error');
-        return;
+    for (const url of urls) {
+        try {
+            const parsedUrl = new URL(url);
+            if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+                showToast('Only HTTP and HTTPS URLs are supported', 'error');
+                return;
+            }
+        } catch (e) {
+            showToast('Invalid URL format: ' + url, 'error');
+            return;
+        }
     }
 
     const destination = state.currentPath || serverHome || '~';
-    console.log('Starting remote download:', { url, destination });
     
     showLoading();
     try {
@@ -1045,17 +1063,21 @@ async function startRemoteDownload() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                url: url,
+                urls: urls,
                 destination: destination
             })
         });
         
         const data = await response.json();
-        console.log('Remote download response:', data);
         
         if (response.ok) {
-            showToast('Download started: ' + (data.task_id || 'Unknown ID'), 'success');
-            state.downloadTasks[data.task_id] = true;
+            const count = data.count || (data.task_ids ? data.task_ids.length : 1);
+            showToast(`Started ${count} download(s)`, 'success');
+            (data.task_ids || [data.task_id]).forEach(taskId => {
+                if (taskId) {
+                    state.downloadTasks[taskId] = true;
+                }
+            });
             document.getElementById('downloadUrl').value = '';
             closeModal('remoteDownloadModal');
             // Immediately update download progress
@@ -1083,12 +1105,19 @@ async function updateDownloadProgress() {
             console.error('Download tasks response is not an array:', tasks);
             return;
         }
+
+        if (elements.opQueue) {
+            const activeCount = tasks.filter(task =>
+                ['pending', 'downloading', 'cancelling'].includes(task.status)
+            ).length;
+            elements.opQueue.textContent = `${activeCount} active`;
+        }
         
         let html = '';
         tasks.forEach(task => {
             const statusClass = task.status || 'pending';
             const progress = task.progress || 0;
-            const filename = task.filename || 'Downloading...';
+            const filename = task.filename || 'Initializing...';
             const url = task.url || '';
             
             html += `
@@ -1106,7 +1135,7 @@ async function updateDownloadProgress() {
                         <span>${task.downloaded_formatted || '0 B'} / ${task.total_size_formatted || 'Unknown'}</span>
                         <span>${task.speed_formatted || '0 B/s'}</span>
                     </div>
-                    ${statusClass === 'downloading' || statusClass === 'pending' ? `
+                    ${['downloading', 'pending', 'cancelling'].includes(statusClass) ? `
                         <div class="download-actions">
                             <button class="btn btn-sm btn-danger" onclick="cancelDownload('${task.id}')">
                                 <i class="fas fa-stop"></i> Cancel
@@ -1116,6 +1145,11 @@ async function updateDownloadProgress() {
                     ${statusClass === 'error' ? `
                         <div class="download-error">
                             <i class="fas fa-exclamation-circle"></i> ${escapeHtml(task.error || 'Download failed')}
+                        </div>
+                    ` : ''}
+                    ${statusClass === 'cancelled' || statusClass === 'cancelling' ? `
+                        <div class="download-cancelled">
+                            <i class="fas fa-ban"></i> ${statusClass === 'cancelling' ? 'Cancelling...' : 'Cancelled'}
                         </div>
                     ` : ''}
                     ${statusClass === 'completed' ? `
@@ -1139,8 +1173,14 @@ async function updateDownloadProgress() {
 
 async function cancelDownload(taskId) {
     try {
-        await fetch(`/api/cancel-download/${taskId}`, { method: 'POST' });
-        showToast('Download cancelled', 'info');
+        const response = await fetch(`/api/cancel-download/${taskId}`, { method: 'POST' });
+        const data = await response.json();
+        if (response.ok) {
+            showToast('Download cancellation requested', 'info');
+            updateDownloadProgress();
+        } else {
+            showToast(data.message || data.error || 'Failed to cancel download', 'warning');
+        }
     } catch (error) {
         showToast('Failed to cancel download', 'error');
     }
@@ -1176,10 +1216,26 @@ async function loadDiskUsage() {
             elements.diskProgressBar.style.width = `${data.percent_used}%`;
             elements.diskUsed.textContent = data.used_formatted;
             elements.diskTotal.textContent = data.total_formatted;
+            if (elements.opStorage) {
+                elements.opStorage.textContent = `${Math.round(data.percent_used)}% used`;
+            }
         }
     } catch (error) {
         console.error('Failed to load disk usage:', error);
     }
+}
+
+function updateOperationsClock() {
+    if (!elements.opClock) return;
+
+    const time = new Date().toISOString().slice(11, 19);
+    elements.opClock.textContent = `UTC ${time}`;
+}
+
+function updateOperationsPath(path) {
+    if (!elements.opPath) return;
+
+    elements.opPath.textContent = `Path: ${path || 'pending'}`;
 }
 
 // Modal Helpers

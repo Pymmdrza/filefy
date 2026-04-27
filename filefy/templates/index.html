@@ -40,7 +40,27 @@
             </div>
             
             <div class="sidebar-section">
-                <h3>Disk Usage</h3>
+                <h3>Operations Console</h3>
+                <div class="ops-console">
+                    <div class="ops-row">
+                        <span>Node</span>
+                        <strong id="opState">Online</strong>
+                    </div>
+                    <div class="ops-row">
+                        <span>Queue</span>
+                        <strong id="opQueue">0 active</strong>
+                    </div>
+                    <div class="ops-row">
+                        <span>Storage</span>
+                        <strong id="opStorage">Scanning</strong>
+                    </div>
+                    <div class="ops-path" id="opPath">Path: pending</div>
+                    <div class="ops-clock" id="opClock">UTC --:--:--</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>Storage Intel</h3>
                 <div class="disk-usage">
                     <div class="disk-progress">
                         <div class="disk-progress-bar" id="diskProgressBar"></div>
@@ -257,8 +277,9 @@
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label for="downloadUrl">File URL</label>
-                    <input type="url" id="downloadUrl" placeholder="https://example.com/file.zip">
+                    <label for="downloadUrl">File URL(s)</label>
+                    <textarea id="downloadUrl" rows="5" placeholder="https://example.com/file.zip&#10;https://example.com/archive.tar.gz"></textarea>
+                    <small class="form-help">Enter one URL per line or separate multiple URLs with commas to start batch downloads.</small>
                 </div>
                 <div class="form-group">
                     <label>Save to: <span id="downloadDestination"></span></label>

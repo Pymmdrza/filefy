@@ -5,6 +5,7 @@ Tests for filefy
 import pytest
 import os
 import tempfile
+from pathlib import Path
 
 
 class TestPackageImports:
@@ -189,6 +190,119 @@ class TestRemoteDownload:
         )
         assert response.status_code == 400
 
+    def test_remote_download_rejects_invalid_scheme(self, client):
+        """Test remote download only accepts HTTP(S) URLs"""
+        response = client.post(
+            "/api/remote-download",
+            json={"url": "file:///etc/passwd", "destination": "/tmp"},
+        )
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "invalid_urls" in data
+
+    def test_remote_download_accepts_multiple_urls(self, client, monkeypatch):
+        """Test starting multiple remote downloads in one request"""
+        import filefy.server as server
+
+        def skip_download(*args):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.download_tasks.clear()
+            monkeypatch.setattr(server, "remote_download_task", skip_download)
+
+            response = client.post(
+                "/api/remote-download",
+                json={
+                    "urls": [
+                        "https://example.com/one.txt",
+                        "https://example.com/two.txt",
+                    ],
+                    "destination": tmpdir,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.get_json()
+            assert data["count"] == 2
+            assert len(data["task_ids"]) == 2
+            assert len(server.download_tasks) == 2
+            server.download_tasks.clear()
+
+    def test_remote_download_accepts_comma_separated_urls(self, client, monkeypatch):
+        """Test comma-separated URLs match the client-side splitter behavior"""
+        import filefy.server as server
+
+        def skip_download(*args):
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.download_tasks.clear()
+            monkeypatch.setattr(server, "remote_download_task", skip_download)
+
+            response = client.post(
+                "/api/remote-download",
+                json={
+                    "url": (
+                        "https://example.com/one.txt," "https://example.com/two.txt"
+                    ),
+                    "destination": tmpdir,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.get_json()
+            assert data["count"] == 2
+            assert len(data["task_ids"]) == 2
+            server.download_tasks.clear()
+
+    def test_cancel_download_marks_active_task(self, client):
+        """Test cancelling an active download marks it for cleanup"""
+        import filefy.server as server
+
+        task_id = "active-task"
+        server.download_tasks[task_id] = {
+            "id": task_id,
+            "url": "https://example.com/file.txt",
+            "destination": "/tmp",
+            "status": "downloading",
+            "progress": 10,
+            "downloaded": 10,
+            "total_size": 100,
+            "speed": 1,
+            "filename": "file.txt",
+            "created_at": 1,
+        }
+
+        response = client.post(f"/api/cancel-download/{task_id}")
+        assert response.status_code == 200
+        assert server.download_tasks[task_id]["cancelled"] is True
+        assert server.download_tasks[task_id]["status"] == "cancelling"
+        server.download_tasks.clear()
+
+    def test_cancel_download_removes_partial_files(self):
+        """Test cancellation cleanup removes reserved and partial files"""
+        import filefy.server as server
+
+        task_id = "cleanup-task"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "file.txt")
+            partial_path = os.path.join(tmpdir, "file.txt.part")
+            Path(file_path).touch()
+            Path(partial_path).touch()
+            server.download_tasks[task_id] = {
+                "id": task_id,
+                "status": "downloading",
+                "speed": 1,
+            }
+
+            server.mark_download_cancelled(task_id, file_path, partial_path)
+
+            assert not os.path.exists(file_path)
+            assert not os.path.exists(partial_path)
+            assert server.download_tasks[task_id]["status"] == "cancelled"
+            server.download_tasks.clear()
+
 
 class TestQuickAccess:
     """Test the dynamic Quick Access endpoint."""
@@ -227,4 +341,3 @@ class TestQuickAccess:
         data = response.get_json()
         paths = {item["path"] for item in data["items"]}
         assert os.path.abspath(os.path.expanduser(data["home"])) in paths
-
