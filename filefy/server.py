@@ -30,6 +30,7 @@ from flask import (
     Response,
     stream_with_context,
 )
+from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
 
 # Get the package directory for templates and static files
@@ -42,6 +43,7 @@ sys.path.insert(0, str(BASE_DIR_PATH))
 # Import configuration manager
 try:
     from config import config_manager, get_settings, get_security, get_details
+
     CONFIG_AVAILABLE = True
 except ImportError:
     CONFIG_AVAILABLE = False
@@ -89,6 +91,10 @@ ALLOWED_EXTENSIONS = {"*"}  # Allow all file types
 
 # Store download progress for remote downloads
 download_tasks = {}
+download_tasks_lock = threading.RLock()
+DOWNLOAD_CHUNK_SIZE = 1024 * 256
+DOWNLOAD_TIMEOUT = (10, 15)
+DOWNLOAD_MAX_BATCH = 20
 
 
 def get_safe_path(path):
@@ -273,63 +279,143 @@ def build_quick_access():
     return items
 
 
+def update_download_task(task_id, **updates):
+    """Safely update a download task."""
+    with download_tasks_lock:
+        if task_id in download_tasks:
+            download_tasks[task_id].update(updates)
+
+
+def get_download_task(task_id):
+    """Return a copy of a download task."""
+    with download_tasks_lock:
+        task = download_tasks.get(task_id)
+        return dict(task) if task else None
+
+
+def is_download_cancelled(task_id):
+    """Check whether a download has been cancelled."""
+    task = get_download_task(task_id)
+    return bool(task and task.get("cancelled"))
+
+
+def split_download_urls(value):
+    """Normalize a single URL, newline text, or URL list."""
+    if isinstance(value, list):
+        raw_urls = value
+    else:
+        raw_urls = str(value or "").replace(",", "\n").splitlines()
+
+    urls = [url.strip() for url in raw_urls if str(url).strip()]
+    return urls[:DOWNLOAD_MAX_BATCH], len(urls) > DOWNLOAD_MAX_BATCH
+
+
+def validate_remote_url(url):
+    """Validate remote download URL input."""
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "Only valid HTTP and HTTPS URLs are supported"
+    return None
+
+
+def get_download_filename(url, response):
+    """Get a safe filename from the response or URL."""
+    filename = None
+    content_disposition = response.headers.get("content-disposition")
+    if content_disposition:
+        _, options = parse_options_header(content_disposition)
+        filename = options.get("filename*") or options.get("filename")
+
+    if not filename:
+        parsed_url = urlparse(url)
+        filename = os.path.basename(parsed_url.path) or "downloaded_file"
+
+    filename = secure_filename(unquote(filename))
+    return filename or "downloaded_file"
+
+
+def reserve_download_path(destination_path, filename):
+    """Reserve a unique destination path for a download."""
+    filename = secure_filename(filename) or "downloaded_file"
+    file_path = os.path.join(destination_path, filename)
+    base, ext = os.path.splitext(file_path)
+    counter = 1
+
+    while True:
+        try:
+            fd = os.open(file_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return file_path
+        except FileExistsError:
+            file_path = f"{base}_{counter}{ext}"
+            counter += 1
+
+
+def cleanup_download_files(*paths):
+    """Remove partial or reserved files left by failed downloads."""
+    for path in paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def mark_download_cancelled(task_id, file_path=None, partial_path=None):
+    """Mark a task cancelled and remove incomplete files."""
+    cleanup_download_files(partial_path, file_path)
+    update_download_task(
+        task_id,
+        status="cancelled",
+        speed=0,
+        cancelled=True,
+        cancelled_at=time.time(),
+    )
+
+
 def remote_download_task(task_id, url, destination_path):
     """Background task for downloading files from remote URLs"""
+    response = None
+    file_path = None
+    partial_path = None
     try:
-        print(
-            f"[Download Task {task_id}] Starting download from {url} to {destination_path}"
-        )
-        download_tasks[task_id]["status"] = "downloading"
-        download_tasks[task_id]["started_at"] = time.time()
+        update_download_task(task_id, status="downloading", started_at=time.time())
 
         # Start the download with headers to mimic browser
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         response = requests.get(
-            url, stream=True, timeout=60, headers=headers, verify=True
+            url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers, verify=True
         )
         response.raise_for_status()
-        print(f"[Download Task {task_id}] Got response, status: {response.status_code}")
+
+        if is_download_cancelled(task_id):
+            mark_download_cancelled(task_id)
+            return
 
         # Get file size if available
         total_size = int(response.headers.get("content-length", 0))
-        download_tasks[task_id]["total_size"] = total_size
+        filename = get_download_filename(url, response)
+        file_path = reserve_download_path(destination_path, filename)
+        partial_path = f"{file_path}.download-{task_id}.part"
 
-        # Get filename from URL or Content-Disposition header
-        filename = None
-        if "content-disposition" in response.headers:
-            cd = response.headers["content-disposition"]
-            if "filename=" in cd:
-                filename = cd.split("filename=")[1].strip("\"'")
-
-        if not filename:
-            parsed_url = urlparse(url)
-            filename = os.path.basename(parsed_url.path) or "downloaded_file"
-
-        filename = secure_filename(filename)
-        file_path = os.path.join(destination_path, filename)
-
-        # Handle duplicate filenames
-        base, ext = os.path.splitext(file_path)
-        counter = 1
-        while os.path.exists(file_path):
-            file_path = f"{base}_{counter}{ext}"
-            counter += 1
-
-        download_tasks[task_id]["filename"] = os.path.basename(file_path)
-        download_tasks[task_id]["file_path"] = file_path
+        update_download_task(
+            task_id,
+            total_size=total_size,
+            filename=os.path.basename(file_path),
+            file_path=file_path,
+            partial_path=partial_path,
+        )
 
         # Download with progress tracking
         downloaded = 0
         start_time = time.time()
 
-        with open(file_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if download_tasks[task_id].get("cancelled"):
-                    f.close()
-                    os.remove(file_path)
-                    download_tasks[task_id]["status"] = "cancelled"
+        with open(partial_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if is_download_cancelled(task_id):
+                    mark_download_cancelled(task_id, file_path, partial_path)
                     return
 
                 if chunk:
@@ -340,29 +426,69 @@ def remote_download_task(task_id, url, destination_path):
                     elapsed = time.time() - start_time
                     speed = downloaded / elapsed if elapsed > 0 else 0
 
-                    download_tasks[task_id]["downloaded"] = downloaded
-                    download_tasks[task_id]["speed"] = speed
+                    progress = 0
                     if total_size > 0:
-                        download_tasks[task_id]["progress"] = (
-                            downloaded / total_size
-                        ) * 100
+                        progress = min((downloaded / total_size) * 100, 99.9)
 
-        download_tasks[task_id]["status"] = "completed"
-        download_tasks[task_id]["progress"] = 100
-        download_tasks[task_id]["completed_at"] = time.time()
+                    update_download_task(
+                        task_id,
+                        downloaded=downloaded,
+                        speed=speed,
+                        progress=progress,
+                    )
+
+        if is_download_cancelled(task_id):
+            mark_download_cancelled(task_id, file_path, partial_path)
+            return
+
+        os.replace(partial_path, file_path)
+        update_download_task(
+            task_id,
+            status="completed",
+            progress=100,
+            speed=0,
+            completed_at=time.time(),
+        )
 
     except requests.exceptions.RequestException as e:
-        print(f"[Download Task {task_id}] Request error: {str(e)}")
-        download_tasks[task_id]["status"] = "error"
-        download_tasks[task_id]["error"] = f"Request failed: {str(e)}"
+        if is_download_cancelled(task_id):
+            mark_download_cancelled(task_id, file_path, partial_path)
+            return
+        cleanup_download_files(partial_path, file_path)
+        update_download_task(
+            task_id,
+            status="error",
+            speed=0,
+            error=f"Request failed: {str(e)}",
+            failed_at=time.time(),
+        )
     except IOError as e:
-        print(f"[Download Task {task_id}] IO error: {str(e)}")
-        download_tasks[task_id]["status"] = "error"
-        download_tasks[task_id]["error"] = f"File error: {str(e)}"
+        if is_download_cancelled(task_id):
+            mark_download_cancelled(task_id, file_path, partial_path)
+            return
+        cleanup_download_files(partial_path, file_path)
+        update_download_task(
+            task_id,
+            status="error",
+            speed=0,
+            error=f"File error: {str(e)}",
+            failed_at=time.time(),
+        )
     except Exception as e:
-        print(f"[Download Task {task_id}] Unexpected error: {str(e)}")
-        download_tasks[task_id]["status"] = "error"
-        download_tasks[task_id]["error"] = f"Unexpected error: {str(e)}"
+        if is_download_cancelled(task_id):
+            mark_download_cancelled(task_id, file_path, partial_path)
+            return
+        cleanup_download_files(partial_path, file_path)
+        update_download_task(
+            task_id,
+            status="error",
+            speed=0,
+            error=f"Unexpected error: {str(e)}",
+            failed_at=time.time(),
+        )
+    finally:
+        if response is not None:
+            response.close()
 
 
 @app.route("/")
@@ -484,50 +610,74 @@ def download(file_path):
 @app.route("/api/remote-download", methods=["POST"])
 def remote_download():
     """Start a remote file download"""
-    data = request.get_json()
-    url = data.get("url")
+    data = request.get_json(silent=True) or {}
+    requested_urls = data.get("urls", data.get("url"))
     destination = data.get("destination", BASE_DIR)
+    urls, truncated = split_download_urls(requested_urls)
 
-    if not url:
-        return jsonify({"error": "URL is required"}), 400
+    if not urls:
+        return jsonify({"error": "At least one URL is required"}), 400
+
+    invalid_urls = [
+        {"url": url, "error": validate_remote_url(url)}
+        for url in urls
+        if validate_remote_url(url)
+    ]
+    if invalid_urls:
+        return jsonify({"error": "Invalid URL", "invalid_urls": invalid_urls}), 400
 
     safe_path = get_safe_path(destination)
 
     if not os.path.exists(safe_path) or not os.path.isdir(safe_path):
         return jsonify({"error": "Invalid destination path"}), 400
 
-    # Create a new download task
-    task_id = str(uuid.uuid4())
-    download_tasks[task_id] = {
-        "id": task_id,
-        "url": url,
-        "destination": safe_path,
-        "status": "pending",
-        "progress": 0,
-        "downloaded": 0,
-        "total_size": 0,
-        "speed": 0,
-        "filename": None,
-        "created_at": time.time(),
-    }
+    task_ids = []
+    for url in urls:
+        task_id = str(uuid.uuid4())
+        task = {
+            "id": task_id,
+            "url": url,
+            "destination": safe_path,
+            "status": "pending",
+            "progress": 0,
+            "downloaded": 0,
+            "total_size": 0,
+            "speed": 0,
+            "filename": None,
+            "file_path": None,
+            "partial_path": None,
+            "cancelled": False,
+            "created_at": time.time(),
+        }
+        with download_tasks_lock:
+            download_tasks[task_id] = task
+        task_ids.append(task_id)
 
-    # Start download in background thread
-    thread = threading.Thread(
-        target=remote_download_task, args=(task_id, url, safe_path)
+        # Start download in background thread
+        thread = threading.Thread(
+            target=remote_download_task, args=(task_id, url, safe_path)
+        )
+        thread.daemon = True
+        thread.start()
+
+    return jsonify(
+        {
+            "task_id": task_ids[0],
+            "task_ids": task_ids,
+            "count": len(task_ids),
+            "truncated": truncated,
+            "message": f"Started {len(task_ids)} download(s)",
+        }
     )
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({"task_id": task_id, "message": "Download started"})
 
 
 @app.route("/api/download-progress/<task_id>")
 def download_progress(task_id):
     """Get the progress of a remote download task"""
-    if task_id not in download_tasks:
+    task = get_download_task(task_id)
+    if not task:
         return jsonify({"error": "Task not found"}), 404
 
-    task = download_tasks[task_id]
     return jsonify(
         {
             "id": task["id"],
@@ -553,18 +703,31 @@ def download_progress(task_id):
 @app.route("/api/cancel-download/<task_id>", methods=["POST"])
 def cancel_download(task_id):
     """Cancel a running download task"""
-    if task_id not in download_tasks:
+    task = get_download_task(task_id)
+    if not task:
         return jsonify({"error": "Task not found"}), 404
 
-    download_tasks[task_id]["cancelled"] = True
-    return jsonify({"message": "Download cancelled"})
+    if task["status"] in {"completed", "error", "cancelled"}:
+        return jsonify({"message": "Task is already finished"}), 409
+
+    update_download_task(
+        task_id,
+        cancelled=True,
+        status="cancelling",
+        speed=0,
+        cancelled_at=time.time(),
+    )
+    return jsonify({"message": "Download cancellation requested"})
 
 
 @app.route("/api/download-tasks")
 def get_download_tasks():
     """Get all download tasks"""
     tasks = []
-    for task_id, task in download_tasks.items():
+    with download_tasks_lock:
+        task_items = list(download_tasks.items())
+
+    for task_id, task in task_items:
         tasks.append(
             {
                 "id": task["id"],
@@ -572,6 +735,9 @@ def get_download_tasks():
                 "status": task["status"],
                 "progress": task["progress"],
                 "filename": task["filename"],
+                "downloaded": task["downloaded"],
+                "total_size": task["total_size"],
+                "speed": task["speed"],
                 "downloaded_formatted": format_size(task["downloaded"]),
                 "total_size_formatted": (
                     format_size(task["total_size"]) if task["total_size"] else "Unknown"
@@ -579,8 +745,12 @@ def get_download_tasks():
                 "speed_formatted": (
                     format_size(task["speed"]) + "/s" if task["speed"] else "0 B/s"
                 ),
+                "error": task.get("error"),
+                "destination": task.get("destination"),
+                "created_at": task.get("created_at"),
             }
         )
+    tasks.sort(key=lambda task: task.get("created_at") or 0, reverse=True)
     return jsonify(tasks)
 
 
