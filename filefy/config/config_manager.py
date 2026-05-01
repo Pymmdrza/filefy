@@ -7,7 +7,7 @@ multiple JSON configuration files including settings, security, details, and bui
 It implements the Singleton pattern for thread-safe configuration access.
 
 Usage:
-    from config import config_manager
+    from filefy.config import config_manager
 
     # Get specific configurations
     settings = config_manager.get_settings()

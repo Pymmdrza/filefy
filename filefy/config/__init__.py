@@ -5,7 +5,7 @@ This package provides centralized configuration management for the Filefy applic
 It handles loading, validation, and access to all configuration files.
 
 Usage:
-    from config import config_manager, get_settings, get_security, get_details
+    from filefy.config import config_manager, get_settings, get_security, get_details
 
     # Get the full config manager
     config = config_manager
