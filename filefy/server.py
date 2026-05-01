@@ -8,14 +8,12 @@ Features:
 """
 
 import os
-import sys
 import shutil
 import string
 import threading
 import time
 import uuid
 import mimetypes
-from pathlib import Path
 from urllib.parse import unquote, urlparse
 from datetime import datetime
 
@@ -30,16 +28,14 @@ from flask import (
 from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
 
+from ._version import __version__ as _PACKAGE_VERSION
+
 # Get the package directory for templates and static files
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR_PATH = Path(PACKAGE_DIR).resolve().parent
 
-# Add parent directory to path for config imports
-sys.path.insert(0, str(BASE_DIR_PATH))
-
-# Import configuration manager
+# Import configuration manager from the bundled config subpackage
 try:
-    from config import config_manager, get_settings, get_details
+    from .config import config_manager, get_settings, get_details
 
     CONFIG_AVAILABLE = True
 except ImportError:
@@ -1076,12 +1072,12 @@ def run(host=None, port=None, debug=False, base_dir=None):
         port = port or settings.port
         base_dir = base_dir or settings.root_directory
         app_name = details.app_name
-        version = details.version
+        version = details.version or _PACKAGE_VERSION
     else:
         host = host or "0.0.0.0"
         port = port or 5000
         app_name = "Filefy"
-        version = "1.0.0"
+        version = _PACKAGE_VERSION
 
     if base_dir:
         BASE_DIR = os.path.abspath(os.path.expanduser(base_dir))
