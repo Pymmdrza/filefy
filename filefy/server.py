@@ -7,6 +7,7 @@ Features:
 - Professional dark theme UI
 """
 
+import logging
 import os
 import re
 import shutil
@@ -33,6 +34,8 @@ from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
 
 from ._version import __version__ as _PACKAGE_VERSION
+
+logger = logging.getLogger(__name__)
 
 # Get the package directory for templates and static files
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1054,9 +1057,10 @@ def compress():
             with tarfile.open(archive_path, tar_mode) as tf:
                 for src in safe_sources:
                     _add_path_to_tar(tf, src, os.path.basename(src))
-    except Exception as exc:
+    except Exception:
         cleanup_download_files(archive_path)
-        return jsonify({"error": f"Failed to build archive: {exc}"}), 500
+        logger.exception("Failed to build archive at %s", archive_path)
+        return jsonify({"error": "Failed to build archive"}), 500
 
     size = os.path.getsize(archive_path)
     return jsonify(
@@ -1116,7 +1120,13 @@ def _parse_content_range(value):
 
 
 def _purge_stale_upload_sessions():
-    """Drop in-memory upload sessions that have been idle for too long."""
+    """Drop in-memory upload sessions that have been idle for too long.
+
+    Called from ``upload_init`` so the cleanup runs lazily whenever a
+    new upload is started; this avoids a dedicated background timer
+    while still keeping the in-memory ``upload_sessions`` table from
+    growing unbounded if clients abandon transfers.
+    """
     now = time.time()
     with upload_sessions_lock:
         stale = [
@@ -1229,8 +1239,9 @@ def upload_chunk(upload_id):
     try:
         with open(partial_path, "ab") as f:
             f.write(data)
-    except OSError as exc:
-        return jsonify({"error": f"Failed to write chunk: {exc}"}), 500
+    except OSError:
+        logger.exception("Failed to write upload chunk for %s", upload_id)
+        return jsonify({"error": "Failed to write chunk"}), 500
 
     new_received = expected_offset + chunk_length
     with upload_sessions_lock:
@@ -1272,9 +1283,10 @@ def upload_complete(upload_id):
 
     try:
         os.replace(session["partial_path"], session["final_path"])
-    except OSError as exc:
+    except OSError:
         cleanup_download_files(session["partial_path"])
-        return jsonify({"error": f"Failed to finalise upload: {exc}"}), 500
+        logger.exception("Failed to finalise upload %s", upload_id)
+        return jsonify({"error": "Failed to finalise upload"}), 500
 
     size = os.path.getsize(session["final_path"])
     return jsonify(
