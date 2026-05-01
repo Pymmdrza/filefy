@@ -342,3 +342,293 @@ class TestQuickAccess:
         data = response.get_json()
         paths = {item["path"] for item in data["items"]}
         assert os.path.abspath(os.path.expanduser(data["home"])) in paths
+
+
+class TestServerInfoAndTunnelParser:
+    """Tests for the /api/server-info endpoint and the tunnel URL parser."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_server_info_endpoint(self, client):
+        response = client.get("/api/server-info")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "version" in data
+        assert "tunnel_status" in data
+        assert "tunnel_url" in data
+        assert "base_dir" in data
+
+    def test_extract_tunnel_url_finds_quick_tunnel(self):
+        from filefy.tunnel import extract_tunnel_url
+
+        log = (
+            "INF Your quick Tunnel has been created! Visit it at:\n"
+            "INF https://random-words-1234.trycloudflare.com\n"
+        )
+        assert extract_tunnel_url(log) == (
+            "https://random-words-1234.trycloudflare.com"
+        )
+
+    def test_extract_tunnel_url_returns_none_for_no_match(self):
+        from filefy.tunnel import extract_tunnel_url
+
+        assert extract_tunnel_url("nothing here") is None
+        assert extract_tunnel_url("") is None
+        assert extract_tunnel_url(None) is None
+
+
+class TestCompressEndpoint:
+    """Tests for /api/compress."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def _make_tree(self, root):
+        """Create a small directory tree under ``root`` and return a list
+        of (file_path, content) tuples for assertions."""
+        Path(root, "a.txt").write_text("hello A")
+        Path(root, "b.txt").write_text("hello B")
+        sub = Path(root, "sub")
+        sub.mkdir()
+        Path(sub, "c.txt").write_text("nested")
+
+    def test_compress_zip_directory(self, client):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_tree(tmp)
+            with tempfile.TemporaryDirectory() as dest:
+                response = client.post(
+                    "/api/compress",
+                    json={
+                        "sources": [tmp],
+                        "destination": dest,
+                        "name": "bundle",
+                        "format": "zip",
+                    },
+                )
+                assert response.status_code == 200, response.get_json()
+                data = response.get_json()
+                assert data["name"].endswith(".zip")
+                with zipfile.ZipFile(data["archive"]) as zf:
+                    names = sorted(zf.namelist())
+                # Use forward slashes for cross-platform comparison
+                names_norm = sorted(n.replace("\\", "/") for n in names)
+                assert any(n.endswith("a.txt") for n in names_norm)
+                assert any(n.endswith("c.txt") for n in names_norm)
+
+    def test_compress_tar_gz_multiple_files(self, client):
+        import tarfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            file_a = Path(tmp, "one.txt")
+            file_a.write_text("one")
+            file_b = Path(tmp, "two.txt")
+            file_b.write_text("two")
+            with tempfile.TemporaryDirectory() as dest:
+                response = client.post(
+                    "/api/compress",
+                    json={
+                        "sources": [str(file_a), str(file_b)],
+                        "destination": dest,
+                        "name": "pair",
+                        "format": "tar.gz",
+                    },
+                )
+                assert response.status_code == 200
+                data = response.get_json()
+                assert data["name"].endswith(".tar.gz")
+                with tarfile.open(data["archive"], "r:gz") as tf:
+                    members = sorted(m.name for m in tf.getmembers())
+                assert members == ["one.txt", "two.txt"]
+
+    def test_compress_rejects_unsupported_format(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "x.txt").write_text("x")
+            response = client.post(
+                "/api/compress",
+                json={
+                    "sources": [tmp],
+                    "destination": tmp,
+                    "format": "rar",
+                },
+            )
+            assert response.status_code == 400
+            assert "Unsupported format" in response.get_json()["error"]
+
+    def test_compress_requires_sources(self, client):
+        response = client.post("/api/compress", json={"format": "zip"})
+        assert response.status_code == 400
+        assert "source" in response.get_json()["error"].lower()
+
+
+class TestChunkedUpload:
+    """Tests for the resumable chunked upload protocol."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def _send_chunk(self, client, upload_id, payload, start, total):
+        end = start + len(payload) - 1
+        return client.put(
+            f"/api/upload-chunk/{upload_id}",
+            data=payload,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{total}",
+                "Content-Type": "application/octet-stream",
+            },
+        )
+
+    def test_full_upload_flow(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = b"abcdefghijklmnopqrstuvwxyz" * 4  # 104 bytes
+            init = client.post(
+                "/api/upload-init",
+                json={
+                    "filename": "hello.bin",
+                    "path": tmp,
+                    "size": len(payload),
+                },
+            )
+            assert init.status_code == 200, init.get_json()
+            upload_id = init.get_json()["upload_id"]
+
+            # Upload in three chunks.
+            chunk1, chunk2, chunk3 = payload[:40], payload[40:80], payload[80:]
+            r1 = self._send_chunk(client, upload_id, chunk1, 0, len(payload))
+            assert r1.status_code == 200
+            r2 = self._send_chunk(client, upload_id, chunk2, 40, len(payload))
+            assert r2.status_code == 200
+
+            # Status should report 80 received before the last chunk.
+            status = client.get(f"/api/upload-status/{upload_id}")
+            assert status.get_json()["received"] == 80
+
+            r3 = self._send_chunk(client, upload_id, chunk3, 80, len(payload))
+            assert r3.status_code == 200
+
+            done = client.post(f"/api/upload-complete/{upload_id}")
+            assert done.status_code == 200, done.get_json()
+            final_path = done.get_json()["path"]
+            assert Path(final_path).read_bytes() == payload
+
+    def test_upload_cancel_removes_partial_file(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = b"x" * 50
+            init = client.post(
+                "/api/upload-init",
+                json={"filename": "drop.bin", "path": tmp, "size": len(payload)},
+            )
+            upload_id = init.get_json()["upload_id"]
+            self._send_chunk(client, upload_id, payload[:20], 0, len(payload))
+
+            cancel = client.delete(f"/api/upload-cancel/{upload_id}")
+            assert cancel.status_code == 200
+            # No leftover .filefy-upload file.
+            leftovers = [
+                p for p in os.listdir(tmp) if p.endswith(".filefy-upload")
+            ]
+            assert leftovers == []
+
+    def test_upload_rejects_out_of_order_chunk(self, client):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = b"y" * 30
+            init = client.post(
+                "/api/upload-init",
+                json={"filename": "ooo.bin", "path": tmp, "size": len(payload)},
+            )
+            upload_id = init.get_json()["upload_id"]
+            # Skip directly to the second chunk to simulate a buggy client.
+            response = self._send_chunk(
+                client, upload_id, payload[10:20], 10, len(payload)
+            )
+            assert response.status_code == 409
+            data = response.get_json()
+            assert data["expected_offset"] == 0
+
+
+class TestPauseResumeDownload:
+    """Tests for the pause / resume / dismiss endpoints."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_pause_only_active_downloads(self, client):
+        import filefy.server as server
+
+        server.download_tasks.clear()
+        server.download_tasks["abc"] = {
+            "id": "abc",
+            "status": "completed",
+            "url": "https://example.com/x",
+        }
+        response = client.post("/api/pause-download/abc")
+        assert response.status_code == 409
+        server.download_tasks.clear()
+
+    def test_pause_then_resume_marks_states(self, client):
+        import filefy.server as server
+
+        server.download_tasks.clear()
+        server.download_tasks["abc"] = {
+            "id": "abc",
+            "status": "downloading",
+            "url": "https://example.com/x",
+            "destination": "/tmp",
+        }
+        response = client.post("/api/pause-download/abc")
+        assert response.status_code == 200
+        assert server.download_tasks["abc"]["paused"] is True
+
+        # Move task to paused status (simulating worker exit).
+        server.download_tasks["abc"]["status"] = "paused"
+
+        # Patch the worker so we don't make real network calls.
+        original = server.remote_download_task
+        try:
+            server.remote_download_task = lambda *args, **kwargs: None
+            response = client.post("/api/resume-download/abc")
+            assert response.status_code == 200
+            assert server.download_tasks["abc"]["paused"] is False
+        finally:
+            server.remote_download_task = original
+            server.download_tasks.clear()
+
+    def test_dismiss_only_terminal_tasks(self, client):
+        import filefy.server as server
+
+        server.download_tasks.clear()
+        server.download_tasks["live"] = {
+            "id": "live",
+            "status": "downloading",
+        }
+        server.download_tasks["done"] = {
+            "id": "done",
+            "status": "completed",
+        }
+
+        assert client.post("/api/dismiss-download/live").status_code == 409
+        assert client.post("/api/dismiss-download/done").status_code == 200
+        assert "done" not in server.download_tasks
+        server.download_tasks.clear()

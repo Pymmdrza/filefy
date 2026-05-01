@@ -76,8 +76,25 @@
                 <button class="btn btn-primary btn-full" id="newRemoteDownload">
                     <i class="fas fa-cloud-download-alt"></i> New Download
                 </button>
-                <div class="download-list" id="downloadList">
-                    <!-- Download tasks will be inserted here -->
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-section-head">
+                    <h3>Active Transfers</h3>
+                    <button class="btn btn-icon btn-tiny" id="sidebarTransferExpand" title="Expand transfer panel">
+                        <i class="fas fa-up-right-and-down-left-from-center"></i>
+                    </button>
+                </div>
+                <div class="sidebar-transfers" id="sidebarTransfers">
+                    <p class="sidebar-empty">No active transfers</p>
+                </div>
+            </div>
+
+            <div class="sidebar-section" id="tunnelSection" style="display:none;">
+                <h3>Public Access</h3>
+                <div class="tunnel-info" id="tunnelInfo">
+                    <span class="tunnel-status" id="tunnelStatus">Disabled</span>
+                    <a href="#" target="_blank" rel="noopener" class="tunnel-url" id="tunnelUrl"></a>
                 </div>
             </div>
         </aside>
@@ -138,6 +155,46 @@
         </aside>
     </div>
 
+    <!-- Transfer Center: centered floating panel for uploads + downloads.
+         Has Minimize and Close buttons in the header. Minimize moves
+         the panel into the sidebar's compact "Active Transfers" view.
+         Close just hides the panel; in-flight transfers keep going and
+         remain visible in the sidebar. -->
+    <div class="transfer-center hidden" id="transferCenter" role="dialog" aria-label="File transfers">
+        <div class="transfer-header">
+            <div class="transfer-title">
+                <i class="fas fa-exchange-alt"></i>
+                <h3>Transfers</h3>
+                <span class="transfer-count-badge" id="transferCountBadge">0</span>
+            </div>
+            <div class="transfer-header-actions">
+                <button class="btn btn-icon" id="transferClearBtn" title="Clear finished">
+                    <i class="fas fa-broom"></i>
+                </button>
+                <button class="btn btn-icon" id="transferMinimizeBtn" title="Minimize to sidebar">
+                    <i class="fas fa-window-minimize"></i>
+                </button>
+                <button class="btn btn-icon" id="transferCloseBtn" title="Close (transfers continue)">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+        </div>
+        <div class="transfer-body" id="transferBody">
+            <div class="transfer-empty" id="transferEmpty">
+                <i class="fas fa-inbox"></i>
+                <p>No transfers yet. Start an upload, download, or remote download to see progress here.</p>
+            </div>
+            <div class="transfer-list" id="transferList"></div>
+        </div>
+    </div>
+
+    <!-- Floating reopen button shown when the Transfer Center is
+         minimised. Clicking it restores the centered panel. -->
+    <button class="transfer-reopen hidden" id="transferReopenBtn" title="Show transfers">
+        <i class="fas fa-exchange-alt"></i>
+        <span id="transferReopenLabel">0</span>
+    </button>
+
     <!-- Context Menu -->
     <div class="context-menu" id="contextMenu">
         <div class="context-menu-section">
@@ -146,6 +203,7 @@
                 <li data-action="open"><i class="fas fa-folder-open"></i> Open</li>
                 <li data-action="preview"><i class="fas fa-eye"></i> Preview</li>
                 <li data-action="download"><i class="fas fa-download"></i> Download</li>
+                <li data-action="compress"><i class="fas fa-file-archive"></i> Compress as...</li>
             </ul>
         </div>
         <div class="context-menu-divider"></div>
@@ -184,7 +242,9 @@
     </div>
 
     <!-- Modals -->
-    <!-- Upload Modal -->
+    <!-- Upload Modal: file picker only. Once Upload is clicked the
+         modal closes and progress is shown in the Transfer Center,
+         which can be minimised to the sidebar. -->
     <div class="modal" id="uploadModal">
         <div class="modal-content">
             <div class="modal-header">
@@ -202,9 +262,15 @@
                 <div class="upload-progress" id="uploadProgress">
                     <div class="upload-file-list" id="uploadFileList"></div>
                 </div>
+                <p class="form-help" style="margin-top:12px;">
+                    Once you start the upload, progress will appear in the
+                    Transfer Center. You can pause, resume, or cancel each
+                    file from there. Closing this dialog does not interrupt
+                    transfers.
+                </p>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-secondary close-modal">Close</button>
                 <button class="btn btn-primary" id="startUploadBtn" disabled>Upload</button>
             </div>
         </div>
@@ -345,6 +411,40 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary close-modal">Cancel</button>
                 <button class="btn btn-primary" id="confirmMoveBtn">Move Here</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Compress Modal -->
+    <div class="modal" id="compressModal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-file-archive"></i> Compress</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Items to compress</label>
+                    <div id="compressSourcesList" class="compress-sources"></div>
+                </div>
+                <div class="form-group">
+                    <label for="compressName">Archive name (without extension)</label>
+                    <input type="text" id="compressName" placeholder="archive">
+                </div>
+                <div class="form-group">
+                    <label for="compressFormat">Format</label>
+                    <select id="compressFormat">
+                        <option value="zip">.zip (best compatibility)</option>
+                        <option value="tar.gz">.tar.gz (gzip compressed)</option>
+                        <option value="tar">.tar (uncompressed)</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="confirmCompressBtn">
+                    <i class="fas fa-file-archive"></i> Create Archive
+                </button>
             </div>
         </div>
     </div>

@@ -1,4 +1,19 @@
 # Automatically bump the patch version on every push to the default branch.
+#
+# When a commit lands on `main`/`master` that touches user-visible code,
+# this workflow:
+#   1. Reads the current version from `filefy/_version.py`.
+#   2. Increments the patch component (or honours `[bump major]` /
+#      `[bump minor]` directives in the head commit message).
+#   3. Commits the updated `_version.py` and `filefy/config/details.json`
+#      with `[skip ci]` so the bump itself does not loop.
+#   4. Creates and pushes a `vX.Y.Z` tag, which is the trigger for
+#      `publish.yml` (the PyPI release workflow).
+#
+# This guarantees that every release uploaded to PyPI carries a unique
+# version, eliminating the "File already exists" 400 error that occurs
+# when twine tries to re-upload an existing version.
+
 name: Auto Bump Version
 
 on:
