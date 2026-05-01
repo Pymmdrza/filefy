@@ -118,7 +118,7 @@ def setup_logging(
     """
     # Try to get settings from config
     try:
-        from config import get_settings
+        from filefy.config import get_settings
         settings = get_settings()
         level = level or settings.log_level
         log_file = log_file or settings.log_path
@@ -226,6 +226,5 @@ def _init_logging() -> None:
 
 # Auto-initialize on import
 _init_logging()
-
 
 
