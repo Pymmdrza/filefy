@@ -8,11 +8,15 @@ Features:
 """
 
 import os
+import re
 import shutil
 import string
+import tarfile
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 import mimetypes
 from urllib.parse import unquote, urlparse
 from datetime import datetime
@@ -94,6 +98,40 @@ DOWNLOAD_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
+# In-memory state for resumable chunked uploads. Each entry maps an
+# upload-id (UUID) to a small dict describing the destination and the
+# current ``.part`` file that bytes are being appended to. Entries are
+# created by ``/api/upload-init`` and removed on completion or cancel.
+upload_sessions = {}
+upload_sessions_lock = threading.RLock()
+UPLOAD_SESSION_TTL_SECONDS = 24 * 60 * 60  # purge idle sessions after 24h
+UPLOAD_PART_SUFFIX = ".filefy-upload"
+
+# Public information about the currently published Cloudflare tunnel,
+# updated by ``run()`` once the tunnel is active. Exposed via the
+# ``/api/server-info`` endpoint so the frontend can render the URL.
+_server_info = {
+    "version": _PACKAGE_VERSION,
+    "tunnel_url": None,
+    "tunnel_status": "disabled",  # one of: disabled, starting, active, error
+    "tunnel_error": None,
+}
+_server_info_lock = threading.RLock()
+
+
+def set_tunnel_info(url=None, status="disabled", error=None):
+    """Update the global tunnel-status structure (thread-safe)."""
+    with _server_info_lock:
+        _server_info["tunnel_url"] = url
+        _server_info["tunnel_status"] = status
+        _server_info["tunnel_error"] = error
+
+
+def get_server_info():
+    """Return a snapshot of the public server info structure."""
+    with _server_info_lock:
+        return dict(_server_info)
 
 
 def get_safe_path(path):
@@ -360,6 +398,12 @@ def cleanup_download_files(*paths):
                 pass
 
 
+def is_download_paused(task_id):
+    """Check whether a download is currently paused by the user."""
+    task = get_download_task(task_id)
+    return bool(task and task.get("paused"))
+
+
 def mark_download_cancelled(task_id, file_path=None, partial_path=None):
     """Mark a task cancelled and remove incomplete files."""
     cleanup_download_files(partial_path, file_path)
@@ -373,21 +417,45 @@ def mark_download_cancelled(task_id, file_path=None, partial_path=None):
 
 
 def remote_download_task(task_id, url, destination_path):
-    """Background task for downloading files from remote URLs"""
+    """Background task for downloading files from remote URLs.
+
+    Supports resume after a pause: when the worker is restarted via the
+    pause/resume endpoints it reads the current ``downloaded`` byte count
+    from the task and re-issues the request with a ``Range`` header so
+    the partial file is appended to instead of being rewritten. If the
+    server does not honour the ``Range`` header (replies ``200`` instead
+    of ``206``) the partial file is truncated and the download restarts
+    from the beginning so the result is still byte-accurate.
+    """
     response = None
-    file_path = None
-    partial_path = None
+    # Snapshot the previous state (if any). When resuming, file_path /
+    # partial_path / downloaded already point at the existing ``.part``
+    # file; on a fresh start they are ``None`` / 0 and we will allocate
+    # them after issuing the initial request.
+    snapshot = get_download_task(task_id) or {}
+    file_path = snapshot.get("file_path")
+    partial_path = snapshot.get("partial_path")
+    downloaded = int(snapshot.get("downloaded") or 0)
+    resuming = bool(file_path and partial_path and downloaded > 0)
+
     try:
         update_download_task(
             task_id,
             status="downloading",
+            paused=False,
             started_at=time.time(),
+            speed=0,
         )
 
-        # Start the download with headers to mimic browser
-        headers = {
-            "User-Agent": DOWNLOAD_USER_AGENT,
-        }
+        headers = {"User-Agent": DOWNLOAD_USER_AGENT}
+        if resuming and os.path.exists(partial_path):
+            headers["Range"] = f"bytes={downloaded}-"
+        else:
+            # Either a fresh start or the partial file vanished while
+            # paused: reset everything so we begin at byte 0.
+            downloaded = 0
+            resuming = False
+
         response = requests.get(
             url,
             stream=True,
@@ -398,40 +466,69 @@ def remote_download_task(task_id, url, destination_path):
         response.raise_for_status()
 
         if is_download_cancelled(task_id):
-            mark_download_cancelled(task_id)
+            mark_download_cancelled(task_id, file_path, partial_path)
             return
 
-        # Get file size if available
-        total_size = int(response.headers.get("content-length", 0))
-        filename = get_download_filename(url, response)
-        file_path = reserve_download_path(destination_path, filename)
-        partial_path = f"{file_path}.part"
-
-        update_download_task(
-            task_id,
-            total_size=total_size,
-            filename=os.path.basename(file_path),
-            file_path=file_path,
-            partial_path=partial_path,
+        # If the server didn't honour our Range request (returned 200
+        # instead of 206) we have to restart from scratch.
+        range_honoured = (
+            resuming and response.status_code == 206
         )
+        if resuming and not range_honoured:
+            downloaded = 0
+            cleanup_download_files(partial_path)
+            resuming = False
 
-        # Download with progress tracking
-        downloaded = 0
+        if not resuming:
+            content_length = int(response.headers.get("content-length", 0))
+            filename = get_download_filename(url, response)
+            file_path = reserve_download_path(destination_path, filename)
+            partial_path = f"{file_path}.part"
+            total_size = content_length
+            update_download_task(
+                task_id,
+                total_size=total_size,
+                filename=os.path.basename(file_path),
+                file_path=file_path,
+                partial_path=partial_path,
+                downloaded=0,
+            )
+        else:
+            # When resuming with a 206, content-length is the *remaining*
+            # number of bytes; total_size is what we already had recorded.
+            total_size = int(snapshot.get("total_size") or 0)
+
+        # Download with progress tracking.
+        mode = "ab" if resuming else "wb"
         start_time = time.time()
+        bytes_in_session = 0
 
-        with open(partial_path, "wb") as f:
+        with open(partial_path, mode) as f:
             for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                 if is_download_cancelled(task_id):
                     mark_download_cancelled(task_id, file_path, partial_path)
                     return
 
+                if is_download_paused(task_id):
+                    # Persist state, leave the .part on disk and exit
+                    # the worker. A fresh worker is spawned by the
+                    # /api/resume-download/<id> endpoint when the user
+                    # asks to continue.
+                    update_download_task(
+                        task_id,
+                        status="paused",
+                        speed=0,
+                        paused_at=time.time(),
+                    )
+                    return
+
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
+                    bytes_in_session += len(chunk)
 
-                    # Calculate progress and speed
                     elapsed = time.time() - start_time
-                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    speed = bytes_in_session / elapsed if elapsed > 0 else 0
 
                     progress = 0
                     if total_size > 0:
@@ -590,24 +687,26 @@ def upload():
 
 @app.route("/api/download/<path:file_path>")
 def download(file_path):
-    """Download a file"""
+    """Download a file, with HTTP Range support so large transfers can be
+    paused / resumed by the browser-side transfer manager.
+
+    Folders are streamed as a freshly-built ``.zip`` archive. Range
+    requests on archives fall back to a non-resumable download because
+    the archive is rebuilt on each request.
+    """
     safe_path = get_safe_path(file_path)
 
     if not os.path.exists(safe_path):
         return jsonify({"error": "File not found"}), 404
 
     if os.path.isdir(safe_path):
-        # Create a zip file for directory download
-        import tempfile
-        import zipfile
-
+        # Directory download = zip archive built on the fly.
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-        with zipfile.ZipFile(temp_file.name, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(safe_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, safe_path)
-                    zf.write(file_path, arcname)
+        try:
+            with zipfile.ZipFile(temp_file.name, "w", zipfile.ZIP_DEFLATED) as zf:
+                _add_path_to_zip(zf, safe_path, os.path.basename(safe_path))
+        finally:
+            temp_file.close()
 
         return send_file(
             temp_file.name,
@@ -615,7 +714,9 @@ def download(file_path):
             download_name=f"{os.path.basename(safe_path)}.zip",
         )
 
-    return send_file(safe_path, as_attachment=True)
+    # Regular file: enable conditional / range responses so the
+    # frontend can implement pause + resume against this endpoint.
+    return send_file(safe_path, as_attachment=True, conditional=True)
 
 
 @app.route("/api/remote-download", methods=["POST"])
@@ -658,6 +759,7 @@ def remote_download():
             "file_path": None,
             "partial_path": None,
             "cancelled": False,
+            "paused": False,
             "created_at": time.time(),
         }
         with download_tasks_lock:
@@ -707,19 +809,28 @@ def download_progress(task_id):
             ),
             "filename": task["filename"],
             "error": task.get("error"),
+            "paused": bool(task.get("paused")),
         }
     )
 
 
 @app.route("/api/cancel-download/<task_id>", methods=["POST"])
 def cancel_download(task_id):
-    """Cancel a running download task"""
+    """Cancel a running, pending or paused download task."""
     task = get_download_task(task_id)
     if not task:
         return jsonify({"error": "Task not found"}), 404
 
     if task["status"] in {"completed", "error", "cancelled"}:
         return jsonify({"message": "Task is already finished"}), 409
+
+    # Paused tasks have no live worker to observe the ``cancelled`` flag,
+    # so we synchronously clean up the partial file here.
+    if task["status"] == "paused":
+        mark_download_cancelled(
+            task_id, task.get("file_path"), task.get("partial_path")
+        )
+        return jsonify({"message": "Download cancelled"})
 
     update_download_task(
         task_id,
@@ -759,10 +870,449 @@ def get_download_tasks():
                 "error": task.get("error"),
                 "destination": task.get("destination"),
                 "created_at": task.get("created_at"),
+                "paused": bool(task.get("paused")),
+                "kind": "remote-download",
             }
         )
     tasks.sort(key=lambda task: task.get("created_at") or 0, reverse=True)
     return jsonify(tasks)
+
+
+@app.route("/api/pause-download/<task_id>", methods=["POST"])
+def pause_download(task_id):
+    """Pause a running download. The worker thread observes the
+    ``paused`` flag at every chunk boundary and exits cleanly, leaving
+    the ``.part`` file on disk for ``/api/resume-download/<id>`` to
+    pick up."""
+    task = get_download_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    if task["status"] != "downloading":
+        return jsonify({"message": "Only active downloads can be paused"}), 409
+
+    update_download_task(task_id, paused=True, speed=0)
+    return jsonify({"message": "Pause requested"})
+
+
+@app.route("/api/resume-download/<task_id>", methods=["POST"])
+def resume_download(task_id):
+    """Resume a paused download by spawning a fresh worker thread that
+    re-uses the existing ``.part`` file via an HTTP ``Range`` request."""
+    task = get_download_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    if task["status"] not in {"paused", "error"}:
+        return jsonify(
+            {"message": "Only paused or errored downloads can be resumed"}
+        ), 409
+    if task.get("cancelled"):
+        return jsonify({"error": "Task is cancelled"}), 409
+
+    update_download_task(task_id, paused=False, status="pending", error=None)
+    thread = threading.Thread(
+        target=remote_download_task,
+        args=(task_id, task["url"], task["destination"]),
+    )
+    thread.daemon = True
+    thread.start()
+    return jsonify({"message": "Resume requested"})
+
+
+@app.route("/api/dismiss-download/<task_id>", methods=["POST"])
+def dismiss_download(task_id):
+    """Remove a finished download task from the listing.
+
+    The frontend calls this when the user explicitly closes a transfer
+    row that is in a terminal state (completed, error or cancelled), so
+    that the side panel does not stay frozen on a "Cancelled" row.
+    """
+    with download_tasks_lock:
+        task = download_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "Task not found"}), 404
+        if task["status"] in {"downloading", "pending", "cancelling"}:
+            return jsonify({"error": "Task is still active"}), 409
+        download_tasks.pop(task_id, None)
+    return jsonify({"message": "Task dismissed"})
+
+
+@app.route("/api/server-info")
+def server_info():
+    """Return runtime information about the server (version, tunnel)."""
+    info = get_server_info()
+    info["base_dir"] = BASE_DIR
+    return jsonify(info)
+
+
+# ---------------------------------------------------------------------------
+# Compression
+# ---------------------------------------------------------------------------
+
+# Map the user-facing format strings to the (extension, callable) pair we
+# use to build the archive. ``None`` for the second tuple member means
+# the format is handled by ``zipfile`` instead of ``tarfile``.
+_ARCHIVE_FORMATS = {
+    "zip": (".zip", None),
+    "tar": (".tar", "w"),
+    "tar.gz": (".tar.gz", "w:gz"),
+    "tgz": (".tar.gz", "w:gz"),
+}
+
+
+def _add_path_to_zip(zf, source, arcname_root):
+    """Add ``source`` (a file or a directory tree) to an open ``zipfile``.
+
+    ``arcname_root`` is the in-archive name to use for ``source`` itself;
+    nested entries are placed under that name with their relative path
+    preserved.
+    """
+    if os.path.isfile(source):
+        zf.write(source, arcname_root)
+        return
+    for root, _dirs, files in os.walk(source):
+        rel_root = os.path.relpath(root, source)
+        for name in files:
+            full = os.path.join(root, name)
+            arc = (
+                arcname_root
+                if rel_root == "."
+                else os.path.join(arcname_root, rel_root)
+            )
+            arc = os.path.join(arc, name)
+            zf.write(full, arc)
+
+
+def _add_path_to_tar(tf, source, arcname_root):
+    """Add ``source`` (file or directory) recursively to an open tarfile."""
+    tf.add(source, arcname=arcname_root, recursive=True)
+
+
+@app.route("/api/compress", methods=["POST"])
+def compress():
+    """Create an archive (zip / tar / tar.gz) from one or more sources.
+
+    Body (JSON)::
+
+        {
+          "sources":     [ "/abs/path/one", "/abs/path/two" ],
+          "destination": "/abs/path/dest_dir",   # defaults to BASE_DIR
+          "name":        "archive",              # without extension
+          "format":      "zip" | "tar" | "tar.gz"
+        }
+
+    On success returns the path of the produced archive and its size.
+    """
+    data = request.get_json(silent=True) or {}
+
+    sources = data.get("sources") or []
+    if isinstance(sources, str):
+        sources = [sources]
+    sources = [s for s in sources if isinstance(s, str) and s.strip()]
+    if not sources:
+        return jsonify({"error": "At least one source path is required"}), 400
+
+    destination = data.get("destination") or BASE_DIR
+    fmt = (data.get("format") or "zip").lower()
+    name = (data.get("name") or "").strip()
+
+    if fmt not in _ARCHIVE_FORMATS:
+        return jsonify({
+            "error": (
+                "Unsupported format. Use one of: "
+                + ", ".join(sorted({k for k in _ARCHIVE_FORMATS if k != "tgz"}))
+            )
+        }), 400
+
+    safe_destination = get_safe_path(destination)
+    if not os.path.isdir(safe_destination):
+        return jsonify({"error": "Destination must be an existing directory"}), 400
+
+    safe_sources = []
+    for src in sources:
+        safe_src = get_safe_path(src)
+        if not os.path.exists(safe_src):
+            return jsonify({"error": f"Source not found: {src}"}), 404
+        safe_sources.append(safe_src)
+
+    if not name:
+        # Default to the first source's basename when the user did not
+        # provide an explicit archive name.
+        name = os.path.basename(os.path.normpath(safe_sources[0])) or "archive"
+    name = secure_filename(name) or "archive"
+
+    extension, tar_mode = _ARCHIVE_FORMATS[fmt]
+    archive_path = reserve_download_path(safe_destination, name + extension)
+
+    try:
+        if tar_mode is None:
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as zf:
+                for src in safe_sources:
+                    _add_path_to_zip(zf, src, os.path.basename(src))
+        else:
+            with tarfile.open(archive_path, tar_mode) as tf:
+                for src in safe_sources:
+                    _add_path_to_tar(tf, src, os.path.basename(src))
+    except Exception as exc:
+        cleanup_download_files(archive_path)
+        return jsonify({"error": f"Failed to build archive: {exc}"}), 500
+
+    size = os.path.getsize(archive_path)
+    return jsonify(
+        {
+            "archive": archive_path,
+            "name": os.path.basename(archive_path),
+            "size": size,
+            "size_formatted": format_size(size),
+            "format": fmt,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resumable, chunked upload protocol
+# ---------------------------------------------------------------------------
+#
+# The flow is:
+#   1.   POST /api/upload-init    -> creates a session, returns upload_id
+#   2.   PUT  /api/upload-chunk/<upload_id>  (with Content-Range header)
+#                                 -> appends a slice of bytes to the part
+#                                    file. The client may stop calling
+#                                    this temporarily (pause), or call it
+#                                    repeatedly until the full size has
+#                                    been received (resume / continue).
+#   3.   POST /api/upload-complete/<upload_id>
+#                                 -> renames .part to the final filename
+#                                    and frees the session.
+#   4.   DELETE /api/upload-cancel/<upload_id>
+#                                 -> removes the .part file and frees
+#                                    the session.
+#   5.   GET  /api/upload-status/<upload_id>
+#                                 -> returns received bytes so the client
+#                                    can resume from where it left off.
+
+_CONTENT_RANGE_RE = re.compile(
+    r"^bytes\s+(?P<start>\d+)-(?P<end>\d+)/(?P<total>\d+|\*)$"
+)
+
+
+def _parse_content_range(value):
+    """Parse a ``Content-Range`` header. Returns ``(start, end, total)`` or
+    ``None`` when the header is missing / malformed. ``total`` may be
+    ``None`` if the client used ``*``."""
+    if not value:
+        return None
+    match = _CONTENT_RANGE_RE.match(value.strip())
+    if not match:
+        return None
+    start = int(match.group("start"))
+    end = int(match.group("end"))
+    total_raw = match.group("total")
+    total = None if total_raw == "*" else int(total_raw)
+    if start < 0 or end < start or (total is not None and end >= total):
+        return None
+    return start, end, total
+
+
+def _purge_stale_upload_sessions():
+    """Drop in-memory upload sessions that have been idle for too long."""
+    now = time.time()
+    with upload_sessions_lock:
+        stale = [
+            uid
+            for uid, sess in upload_sessions.items()
+            if now - sess.get("updated_at", 0) > UPLOAD_SESSION_TTL_SECONDS
+        ]
+        for uid in stale:
+            sess = upload_sessions.pop(uid, None)
+            if sess:
+                cleanup_download_files(sess.get("partial_path"))
+
+
+@app.route("/api/upload-init", methods=["POST"])
+def upload_init():
+    """Open a new chunked-upload session."""
+    _purge_stale_upload_sessions()
+
+    data = request.get_json(silent=True) or {}
+    raw_filename = data.get("filename")
+    raw_path = data.get("path") or BASE_DIR
+    total_size = data.get("size")
+
+    if not raw_filename or not isinstance(raw_filename, str):
+        return jsonify({"error": "filename is required"}), 400
+    if total_size is None or not isinstance(total_size, int) or total_size < 0:
+        return jsonify({"error": "size must be a non-negative integer"}), 400
+
+    filename = secure_filename(raw_filename) or "upload"
+    safe_destination = get_safe_path(raw_path)
+    if not os.path.isdir(safe_destination):
+        return jsonify({"error": "Destination must be an existing directory"}), 400
+
+    final_path = reserve_download_path(safe_destination, filename)
+    partial_path = final_path + UPLOAD_PART_SUFFIX
+    # ``reserve_download_path`` created an empty file at ``final_path``
+    # to atomically claim the name. Move that placeholder to the part
+    # file so the user does not see a zero-byte final file while the
+    # upload is in progress.
+    try:
+        os.replace(final_path, partial_path)
+    except OSError:
+        cleanup_download_files(final_path)
+        return jsonify({"error": "Failed to allocate upload buffer"}), 500
+
+    upload_id = str(uuid.uuid4())
+    session = {
+        "id": upload_id,
+        "filename": os.path.basename(final_path),
+        "destination": safe_destination,
+        "final_path": final_path,
+        "partial_path": partial_path,
+        "received": 0,
+        "total_size": total_size,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with upload_sessions_lock:
+        upload_sessions[upload_id] = session
+    return jsonify(
+        {
+            "upload_id": upload_id,
+            "filename": session["filename"],
+            "received": 0,
+            "total_size": total_size,
+        }
+    )
+
+
+@app.route("/api/upload-chunk/<upload_id>", methods=["PUT"])
+def upload_chunk(upload_id):
+    """Append a chunk of bytes to an in-progress upload."""
+    with upload_sessions_lock:
+        session = upload_sessions.get(upload_id)
+        if not session:
+            return jsonify({"error": "Upload session not found"}), 404
+        partial_path = session["partial_path"]
+        expected_offset = session["received"]
+        total_size = session["total_size"]
+
+    content_range = request.headers.get("Content-Range")
+    parsed = _parse_content_range(content_range)
+    if not parsed:
+        return jsonify({
+            "error": "Missing or malformed Content-Range header. "
+                     "Use 'bytes start-end/total'.",
+        }), 400
+    start, end, declared_total = parsed
+    chunk_length = end - start + 1
+    if declared_total is not None and declared_total != total_size:
+        return jsonify(
+            {"error": "Content-Range total disagrees with session size"}
+        ), 400
+
+    if start != expected_offset:
+        # The client is out of sync with the server; tell it where to
+        # restart so it can adjust without losing data.
+        return jsonify(
+            {
+                "error": "Chunk out of order",
+                "expected_offset": expected_offset,
+                "received": expected_offset,
+            }
+        ), 409
+
+    data = request.get_data(cache=False, as_text=False)
+    if len(data) != chunk_length:
+        return jsonify({"error": "Body length does not match Content-Range"}), 400
+
+    try:
+        with open(partial_path, "ab") as f:
+            f.write(data)
+    except OSError as exc:
+        return jsonify({"error": f"Failed to write chunk: {exc}"}), 500
+
+    new_received = expected_offset + chunk_length
+    with upload_sessions_lock:
+        session = upload_sessions.get(upload_id)
+        if not session:
+            return jsonify({"error": "Upload session vanished"}), 404
+        session["received"] = new_received
+        session["updated_at"] = time.time()
+
+    return jsonify(
+        {
+            "received": new_received,
+            "total_size": total_size,
+            "complete": new_received >= total_size,
+        }
+    )
+
+
+@app.route("/api/upload-complete/<upload_id>", methods=["POST"])
+def upload_complete(upload_id):
+    """Finalise a chunked upload by renaming the part file."""
+    with upload_sessions_lock:
+        session = upload_sessions.pop(upload_id, None)
+    if not session:
+        return jsonify({"error": "Upload session not found"}), 404
+
+    if session["received"] != session["total_size"]:
+        # Put the session back so the client can keep uploading or
+        # cancel cleanly.
+        with upload_sessions_lock:
+            upload_sessions[upload_id] = session
+        return jsonify(
+            {
+                "error": "Upload is incomplete",
+                "received": session["received"],
+                "total_size": session["total_size"],
+            }
+        ), 409
+
+    try:
+        os.replace(session["partial_path"], session["final_path"])
+    except OSError as exc:
+        cleanup_download_files(session["partial_path"])
+        return jsonify({"error": f"Failed to finalise upload: {exc}"}), 500
+
+    size = os.path.getsize(session["final_path"])
+    return jsonify(
+        {
+            "filename": os.path.basename(session["final_path"]),
+            "path": session["final_path"],
+            "size": size,
+            "size_formatted": format_size(size),
+        }
+    )
+
+
+@app.route("/api/upload-cancel/<upload_id>", methods=["DELETE"])
+def upload_cancel(upload_id):
+    """Cancel an upload session and remove the partial file."""
+    with upload_sessions_lock:
+        session = upload_sessions.pop(upload_id, None)
+    if not session:
+        return jsonify({"error": "Upload session not found"}), 404
+    cleanup_download_files(session.get("partial_path"))
+    return jsonify({"message": "Upload cancelled"})
+
+
+@app.route("/api/upload-status/<upload_id>")
+def upload_status(upload_id):
+    """Report how many bytes have been received so the client can resume."""
+    with upload_sessions_lock:
+        session = upload_sessions.get(upload_id)
+        if not session:
+            return jsonify({"error": "Upload session not found"}), 404
+        return jsonify(
+            {
+                "upload_id": upload_id,
+                "received": session["received"],
+                "total_size": session["total_size"],
+                "filename": session["filename"],
+            }
+        )
 
 
 @app.route("/api/create-folder", methods=["POST"])
@@ -1053,14 +1603,17 @@ def disk_usage():
         return jsonify({"error": str(e)}), 500
 
 
-def run(host=None, port=None, debug=False, base_dir=None):
-    """Run the Filer server
+def run(host=None, port=None, debug=False, base_dir=None, tunnel=False):
+    """Run the Filefy server.
 
     Args:
         host: Host to bind to (default: from config or 0.0.0.0)
         port: Port to listen on (default: from config or 5000)
         debug: Enable debug mode (default: False)
         base_dir: Base directory for file management (default: user home)
+        tunnel: When True, also publish a Cloudflare quick tunnel and
+                print its public URL alongside the local URL. Requires
+                the ``cloudflared`` binary to be installed and on PATH.
     """
     global BASE_DIR
 
@@ -1082,16 +1635,55 @@ def run(host=None, port=None, debug=False, base_dir=None):
     if base_dir:
         BASE_DIR = os.path.abspath(os.path.expanduser(base_dir))
 
+    # Determine the URL we should ask Cloudflare to publish. When the
+    # server is bound to 0.0.0.0 the loopback address is the right
+    # target for the local cloudflared process.
+    public_target_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    local_url = f"http://{host}:{port}"
+    public_target_url = f"http://{public_target_host}:{port}"
+
+    tunnel_instance = None
+    public_url = None
+    tunnel_error = None
+    if tunnel:
+        from .tunnel import CloudflareTunnel, TunnelError
+
+        set_tunnel_info(status="starting")
+        try:
+            tunnel_instance = CloudflareTunnel(local_url=public_target_url)
+            tunnel_instance.start()
+            public_url = tunnel_instance.wait_for_url(timeout=30)
+            if public_url:
+                set_tunnel_info(url=public_url, status="active")
+            else:
+                tunnel_error = (
+                    "cloudflared started but did not report a public URL "
+                    "within 30 seconds"
+                )
+                set_tunnel_info(status="error", error=tunnel_error)
+        except TunnelError as exc:
+            tunnel_error = str(exc)
+            set_tunnel_info(status="error", error=tunnel_error)
+
     print()
     print("\033[1;36m" + "=" * 55 + "\033[0m")
     print(f"\033[1;36m   {app_name} v{version} - Web-Based File Manager\033[0m")
     print("\033[1;36m" + "=" * 55 + "\033[0m")
     print(f"\033[1;33m   Base Directory:\033[0m {BASE_DIR}")
-    print(f"\033[1;33m   Server URL:\033[0m http://{host}:{port}")
+    print(f"\033[1;33m   Local URL:\033[0m     {local_url}")
+    if public_url:
+        print(f"\033[1;32m   Public URL:\033[0m    {public_url}")
+    elif tunnel:
+        print(f"\033[1;31m   Public URL:\033[0m    unavailable ({tunnel_error})")
     print("\033[1;36m" + "=" * 55 + "\033[0m")
     print()
 
-    app.run(host=host, port=port, debug=debug)
+    try:
+        app.run(host=host, port=port, debug=debug)
+    finally:
+        if tunnel_instance is not None:
+            tunnel_instance.stop()
+            set_tunnel_info(status="disabled")
 
 
 if __name__ == "__main__":

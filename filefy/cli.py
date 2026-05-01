@@ -89,6 +89,16 @@ Visit https://github.com/Pymmdrza/filefy for more information.
     )
 
     parser.add_argument(
+        "--tunnel",
+        action="store_true",
+        help=(
+            "Also publish the server through a Cloudflare quick tunnel and "
+            "print the public URL. Requires the 'cloudflared' binary to be "
+            "installed and on PATH. The local URL stays available too."
+        ),
+    )
+
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
@@ -105,6 +115,7 @@ Visit https://github.com/Pymmdrza/filefy for more information.
             port=args.port,
             debug=args.debug,
             base_dir=args.directory,
+            tunnel=args.tunnel,
         )
     except KeyboardInterrupt:
         print("\n\nFilefy stopped. Goodbye!")
