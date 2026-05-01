@@ -14,8 +14,9 @@ class TestPackageImports:
     def test_import_main_module(self):
         """Test importing the main module"""
         from filefy import __version__, app, create_app
+        from filefy._version import __version__ as expected_version
 
-        assert __version__ == "1.0.0"
+        assert __version__ == expected_version
         assert app is not None
         assert callable(create_app)
 

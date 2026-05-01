@@ -1,0 +1,120 @@
+# Automatically bump the patch version on every push to the default branch.
+#
+# When a commit lands on `main`/`master` that touches user-visible code,
+# this workflow:
+#   1. Reads the current version from `filefy/_version.py`.
+#   2. Increments the patch component (or honours `[bump major]` /
+#      `[bump minor]` directives in the head commit message).
+#   3. Commits the updated `_version.py` and `filefy/config/details.json`
+#      with `[skip ci]` so the bump itself does not loop.
+#   4. Creates and pushes a `vX.Y.Z` tag, which is the trigger for
+#      `publish.yml` (the PyPI release workflow).
+#
+# This guarantees that every release uploaded to PyPI carries a unique
+# version, eliminating the "File already exists" 400 error that occurs
+# when twine tries to re-upload an existing version.
+
+name: Auto Bump Version
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'filefy/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'MANIFEST.in'
+      - 'Dockerfile'
+  workflow_dispatch:
+    inputs:
+      part:
+        description: 'Which version part to bump'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: auto-bump-version
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    # Skip if the commit was produced by this workflow itself.
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Determine bump type
+        id: bump_type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "part=${{ github.event.inputs.part }}" >> "$GITHUB_OUTPUT"
+          else
+            MSG="${{ github.event.head_commit.message }}"
+            if echo "$MSG" | grep -q "\[bump major\]"; then
+              echo "part=major" >> "$GITHUB_OUTPUT"
+            elif echo "$MSG" | grep -q "\[bump minor\]"; then
+              echo "part=minor" >> "$GITHUB_OUTPUT"
+            else
+              echo "part=patch" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Bump version
+        id: bump
+        run: |
+          NEW_VERSION="$(python scripts/bump_version.py ${{ steps.bump_type.outputs.part }})"
+          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Bumped to ${NEW_VERSION}"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          TAG="v${{ steps.bump.outputs.new_version }}"
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add filefy/_version.py filefy/config/details.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(release): bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Create and push tag
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.tag_check.outputs.tag }}"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"

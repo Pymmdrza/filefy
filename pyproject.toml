@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "filefy"
-version = "1.0.0"
+dynamic = ["version"]
 description = "A professional web-based file manager with dark theme UI"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 authors = [
     {name = "Mmdrza", email = "pymmdrza@gmail.com"}
@@ -15,7 +16,7 @@ authors = [
 
 keywords = [
     "file-manager",
-    "web-file-manager", 
+    "web-file-manager",
     "flask",
     "file-browser",
     "remote-download",
@@ -30,7 +31,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -69,8 +69,14 @@ Changelog = "https://github.com/Pymmdrza/filefy/releases"
 filefy = "filefy.cli:main"
 
 [tool.setuptools]
-packages = ["filefy"]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "filefy._version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["filefy", "filefy.*"]
+exclude = ["tests*", "scripts*"]
 
 [tool.setuptools.package-data]
 filefy = [
@@ -79,12 +85,13 @@ filefy = [
     "static/css/*.css",
     "static/js/*.js",
     "static/img/*",
-    "static/**/*"
+    "static/**/*",
+    "config/*.json"
 ]
 
 [tool.black]
 line-length = 88
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
+target-version = ['py39', 'py310', 'py311', 'py312']
 include = '\.pyi?$'
 exclude = '''
 /(

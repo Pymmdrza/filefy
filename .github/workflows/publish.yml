@@ -1,15 +1,23 @@
-# GitHub Actions workflow for building and publishing Filefy to PyPI
-# Triggers on version tags (v*) and allows manual dispatch
+# Build and publish Filefy to PyPI.
+#
+# This workflow is the single source of truth for releases. It triggers
+# exclusively on push of a `vX.Y.Z` tag (which is created automatically
+# by `version-bump.yml` on every push to the default branch, or manually
+# by a maintainer). Triggering only on tags - and not on the GitHub
+# `release` event as well - prevents the duplicate uploads that used to
+# cause "File already exists" errors on PyPI.
+#
+# A safety check verifies that the tag matches the version recorded in
+# `filefy/_version.py`, and `twine upload --skip-existing` is used so
+# accidental re-runs never fail the workflow.
 
 name: Build and Publish to PyPI
 
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0, v2.1.3, etc.
-  release:
-    types: [published]
-  workflow_dispatch:  # Allow manual trigger
+      - 'v*'
+  workflow_dispatch:
     inputs:
       publish_to_pypi:
         description: 'Publish to PyPI'
@@ -17,11 +25,49 @@ on:
         default: 'true'
         type: boolean
 
+concurrency:
+  group: publish-pypi-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  # Job 1: Run tests before building
+  # Job 1: Validate that the tag matches the in-repo version.
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read version from source
+        id: read
+        run: |
+          VERSION="$(python scripts/bump_version.py show)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Source version: ${VERSION}"
+
+      - name: Verify tag matches version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          EXPECTED="v${{ steps.read.outputs.version }}"
+          if [ "${TAG}" != "${EXPECTED}" ]; then
+            echo "Tag ${TAG} does not match source version ${EXPECTED}." >&2
+            exit 1
+          fi
+          echo "Tag ${TAG} matches source version."
+
+  # Job 2: Run the test suite across all supported Python versions.
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    needs: validate
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
@@ -41,9 +87,11 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
+      - name: Install package in editable mode
+        run: pip install -e .
+
       - name: Run tests
-        run: |
-          pytest tests/ -v --cov=filefy --cov-report=xml || true
+        run: pytest tests/ -v --cov=filefy --cov-report=xml
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
@@ -52,7 +100,7 @@ jobs:
           fail_ci_if_error: false
         continue-on-error: true
 
-  # Job 2: Build the package
+  # Job 3: Build the sdist and wheel.
   build:
     name: Build Package
     runs-on: ubuntu-latest
@@ -73,12 +121,43 @@ jobs:
           pip install build twine
 
       - name: Build package
-        run: |
-          python -m build
+        run: python -m build
 
       - name: Check package with twine
+        run: twine check dist/*
+
+      - name: Verify wheel contents include bundled config
         run: |
-          twine check dist/*
+          python - <<'PY'
+          import glob
+          import zipfile
+          wheels = glob.glob("dist/*.whl")
+          assert wheels, "No wheel produced"
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = zf.namelist()
+          required = [
+              "filefy/__init__.py",
+              "filefy/cli.py",
+              "filefy/server.py",
+              "filefy/_version.py",
+              "filefy/config/__init__.py",
+              "filefy/config/config_manager.py",
+              "filefy/config/details.json",
+              "filefy/config/settings.json",
+          ]
+          missing = [r for r in required if r not in names]
+          if missing:
+              raise SystemExit(f"Wheel is missing required files: {missing}")
+          print("Wheel contents OK.")
+          PY
+
+      - name: Smoke-test installed CLI
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --upgrade pip
+          /tmp/smoke/bin/pip install dist/*.whl
+          /tmp/smoke/bin/filefy --version
+          /tmp/smoke/bin/filefy --help
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -87,12 +166,12 @@ jobs:
           path: dist/
           retention-days: 5
 
-  # Job 3: Publish to PyPI
+  # Job 4: Publish to PyPI (trusted publishing via OIDC, with token fallback).
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'release' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_pypi == 'true')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_pypi == 'true')
 
     environment:
       name: pypi
@@ -122,15 +201,14 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          twine upload dist/*
+        run: twine upload --skip-existing --non-interactive dist/*
 
-  # Job 4: Create GitHub Release assets (optional)
+  # Job 5: Attach build artifacts to the matching GitHub release (if any).
   release-assets:
     name: Upload Release Assets
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'release'
+    if: startsWith(github.ref, 'refs/tags/v')
 
     permissions:
       contents: write
@@ -143,11 +221,11 @@ jobs:
           path: dist/
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.whl
             dist/*.tar.gz
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
