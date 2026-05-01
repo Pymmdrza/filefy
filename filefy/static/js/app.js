@@ -10,9 +10,14 @@ const state = {
     clipboard: null,
     clipboardAction: null, // 'copy' or 'cut'
     viewMode: 'grid',
-    downloadTasks: {},
     uploadFiles: [],
-    browserPath: null
+    browserPath: null,
+    // Local registry of all in-flight transfers (uploads, local
+    // downloads, and remote downloads). Keyed by a synthetic id; each
+    // entry holds the data needed to render and control the transfer.
+    transfers: {},
+    transferPanelHidden: true,
+    transferPanelMinimized: false
 };
 
 // DOM Elements
@@ -26,7 +31,6 @@ const elements = {
     contextMenu: document.getElementById('contextMenu'),
     detailsPanel: document.getElementById('detailsPanel'),
     detailsContent: document.getElementById('detailsContent'),
-    downloadList: document.getElementById('downloadList'),
     diskProgressBar: document.getElementById('diskProgressBar'),
     diskUsed: document.getElementById('diskUsed'),
     diskTotal: document.getElementById('diskTotal'),
@@ -37,7 +41,19 @@ const elements = {
     opClock: document.getElementById('opClock'),
     loadingOverlay: document.getElementById('loadingOverlay'),
     toastContainer: document.getElementById('toastContainer'),
-    quickLinks: document.getElementById('quickLinks')
+    quickLinks: document.getElementById('quickLinks'),
+    // Transfer center
+    transferCenter: document.getElementById('transferCenter'),
+    transferList: document.getElementById('transferList'),
+    transferEmpty: document.getElementById('transferEmpty'),
+    transferCountBadge: document.getElementById('transferCountBadge'),
+    transferReopenBtn: document.getElementById('transferReopenBtn'),
+    transferReopenLabel: document.getElementById('transferReopenLabel'),
+    sidebarTransfers: document.getElementById('sidebarTransfers'),
+    // Tunnel info
+    tunnelSection: document.getElementById('tunnelSection'),
+    tunnelStatus: document.getElementById('tunnelStatus'),
+    tunnelUrl: document.getElementById('tunnelUrl')
 };
 
 // Server-reported home/base directory (set after /api/quick-access loads)
@@ -55,16 +71,21 @@ function init() {
     // than relying on hardcoded paths.
     loadQuickAccess();
 
-    // Load disk usage
+    // Load disk usage and tunnel/server info
     loadDiskUsage();
+    loadServerInfo();
 
-    // Start download progress monitoring
-    setInterval(updateDownloadProgress, 1000);
+    // Periodically poll remote-download progress and refresh the
+    // unified Transfer Center / sidebar views.
+    setInterval(refreshRemoteDownloads, 1000);
     setInterval(updateOperationsClock, 1000);
+    setInterval(loadServerInfo, 15000);
     updateOperationsClock();
+    renderTransfers();
 
     // Setup event listeners
     setupEventListeners();
+    setupTransferCenter();
 }
 
 // Load Quick Access shortcuts from the server and render them in the sidebar
@@ -216,6 +237,14 @@ function setupEventListeners() {
     document.getElementById('confirmRenameBtn').addEventListener('click', () => {
         renameItem();
     });
+
+    // Compress confirm button
+    const compressBtn = document.getElementById('confirmCompressBtn');
+    if (compressBtn) {
+        compressBtn.addEventListener('click', () => {
+            confirmCompress();
+        });
+    }
 
     // New name input - enter key
     document.getElementById('newName').addEventListener('keyup', (e) => {
@@ -630,6 +659,10 @@ function handleContextAction(action) {
             if (!state.selectedItem) return;
             showPropertiesDialog();
             break;
+        case 'compress':
+            if (!state.selectedItem) return;
+            showCompressDialog();
+            break;
     }
 }
 
@@ -768,22 +801,430 @@ async function confirmMoveCopy() {
     hideLoading();
 }
 
-// Download
-function downloadSelectedItem() {
-    if (!state.selectedItem) return;
-    
-    const link = document.createElement('a');
-    link.href = `/api/download/${encodeURIComponent(state.selectedItem.path)}`;
-    link.download = '';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+// =============================================================
+// Transfer Center
+// =============================================================
+//
+// All uploads, local downloads, and remote downloads flow through
+// `state.transfers` and are rendered both in the centered Transfer
+// Center panel and (in compact form) in the sidebar's "Active
+// Transfers" section. Each entry has the shape:
+//
+//     {
+//         id: '<uuid>',
+//         kind: 'upload' | 'download' | 'remote-download',
+//         filename: 'foo.bin',
+//         status: 'uploading' | 'downloading' | 'paused'
+//                | 'cancelling' | 'cancelled' | 'completed' | 'error',
+//         transferred: <int bytes>,
+//         total: <int bytes>,            // 0 if unknown
+//         speed: <int bytes/sec>,
+//         error: <string>,
+//         // kind-specific control hooks installed by the starter:
+//         pause:    function() {},
+//         resume:   function() {},
+//         cancel:   function() {},
+//         // transient runtime data:
+//         _xhr:     XMLHttpRequest        // for uploads / local DLs
+//         _abortController: AbortController
+//     }
+// =============================================================
+
+const TERMINAL_STATUSES = ['completed', 'error', 'cancelled'];
+const ACTIVE_STATUSES = ['uploading', 'downloading', 'paused', 'cancelling', 'pending'];
+
+function setupTransferCenter() {
+    document.getElementById('transferMinimizeBtn').addEventListener('click', () => {
+        state.transferPanelMinimized = true;
+        elements.transferCenter.classList.add('hidden');
+        updateTransferReopen();
+    });
+    document.getElementById('transferCloseBtn').addEventListener('click', () => {
+        // Close just hides the panel; the transfers themselves keep
+        // running and stay accessible from the sidebar. The user must
+        // click Cancel on a row to actually abort a transfer.
+        state.transferPanelHidden = true;
+        state.transferPanelMinimized = false;
+        elements.transferCenter.classList.add('hidden');
+        updateTransferReopen();
+    });
+    document.getElementById('transferClearBtn').addEventListener('click', () => {
+        Object.values(state.transfers)
+            .filter(t => TERMINAL_STATUSES.includes(t.status))
+            .forEach(t => removeTransfer(t.id));
+        renderTransfers();
+    });
+    elements.transferReopenBtn.addEventListener('click', () => {
+        showTransferCenter();
+    });
+    document.getElementById('sidebarTransferExpand').addEventListener('click', () => {
+        showTransferCenter();
+    });
 }
 
-// File Upload
+function showTransferCenter() {
+    state.transferPanelHidden = false;
+    state.transferPanelMinimized = false;
+    elements.transferCenter.classList.remove('hidden');
+    updateTransferReopen();
+}
+
+function updateTransferReopen() {
+    const active = Object.values(state.transfers).filter(t =>
+        ACTIVE_STATUSES.includes(t.status)
+    ).length;
+    if ((state.transferPanelHidden || state.transferPanelMinimized) && active > 0) {
+        elements.transferReopenBtn.classList.remove('hidden');
+        elements.transferReopenLabel.textContent = String(active);
+    } else {
+        elements.transferReopenBtn.classList.add('hidden');
+    }
+}
+
+function addTransfer(transfer) {
+    state.transfers[transfer.id] = transfer;
+    // Auto-show the panel the first time something happens, unless the
+    // user has explicitly closed or minimised it during this session.
+    if (state.transferPanelHidden && !state.transferPanelMinimized) {
+        showTransferCenter();
+    }
+    renderTransfers();
+}
+
+function updateTransfer(id, updates) {
+    const t = state.transfers[id];
+    if (!t) return;
+    Object.assign(t, updates);
+    renderTransfers();
+}
+
+function removeTransfer(id) {
+    delete state.transfers[id];
+}
+
+function transferActionLabel(action) {
+    return ({
+        pause:   '<i class="fas fa-pause"></i> Pause',
+        resume:  '<i class="fas fa-play"></i> Resume',
+        cancel:  '<i class="fas fa-stop"></i> Cancel',
+        dismiss: '<i class="fas fa-times"></i> Dismiss',
+        retry:   '<i class="fas fa-redo"></i> Retry'
+    })[action] || action;
+}
+
+function transferActionsFor(t) {
+    const actions = [];
+    if (t.status === 'uploading' || t.status === 'downloading') {
+        if (typeof t.pause === 'function') actions.push('pause');
+        if (typeof t.cancel === 'function') actions.push('cancel');
+    } else if (t.status === 'paused') {
+        if (typeof t.resume === 'function') actions.push('resume');
+        if (typeof t.cancel === 'function') actions.push('cancel');
+    } else if (t.status === 'pending' || t.status === 'cancelling') {
+        if (typeof t.cancel === 'function') actions.push('cancel');
+    } else {
+        // Terminal states: completed / error / cancelled.
+        if (t.status === 'error' && typeof t.resume === 'function') {
+            actions.push('retry');
+        }
+        actions.push('dismiss');
+    }
+    return actions;
+}
+
+async function dispatchTransferAction(id, action) {
+    const t = state.transfers[id];
+    if (!t) return;
+    if (action === 'dismiss') {
+        // Run any kind-specific dismiss hook (e.g. for remote downloads
+        // we tell the server to forget the task) before removing the
+        // local record, so that the next poll does not re-add it.
+        if (typeof t.dismiss === 'function') {
+            try { await t.dismiss(); } catch (e) { /* ignore */ }
+        }
+        removeTransfer(t.id);
+        renderTransfers();
+        return;
+    }
+    if (action === 'retry' && typeof t.resume === 'function') {
+        try { t.resume(); } catch (e) { showToast('Retry failed: ' + e.message, 'error'); }
+        return;
+    }
+    const fn = t[action];
+    if (typeof fn === 'function') {
+        try { fn(); } catch (e) { showToast('Action failed: ' + e.message, 'error'); }
+    }
+}
+
+function transferKindIcon(kind) {
+    return {
+        upload: 'fa-upload',
+        download: 'fa-download',
+        'remote-download': 'fa-cloud-download-alt'
+    }[kind] || 'fa-exchange-alt';
+}
+
+function renderTransfers() {
+    const transfers = Object.values(state.transfers).sort(
+        (a, b) => (b.startedAt || 0) - (a.startedAt || 0)
+    );
+    const activeCount = transfers.filter(t => ACTIVE_STATUSES.includes(t.status)).length;
+
+    if (elements.transferCountBadge) {
+        elements.transferCountBadge.textContent = String(transfers.length);
+    }
+    if (elements.opQueue) {
+        elements.opQueue.textContent = `${activeCount} active`;
+    }
+
+    // Centered panel
+    if (elements.transferList && elements.transferEmpty) {
+        if (!transfers.length) {
+            elements.transferEmpty.style.display = '';
+            elements.transferList.innerHTML = '';
+        } else {
+            elements.transferEmpty.style.display = 'none';
+            elements.transferList.innerHTML = transfers.map(renderTransferRow).join('');
+            attachTransferActionListeners(elements.transferList);
+        }
+    }
+
+    // Sidebar compact view
+    if (elements.sidebarTransfers) {
+        if (!transfers.length) {
+            elements.sidebarTransfers.innerHTML = '<p class="sidebar-empty">No active transfers</p>';
+        } else {
+            elements.sidebarTransfers.innerHTML = transfers.map(renderSidebarTransferRow).join('');
+            attachTransferActionListeners(elements.sidebarTransfers);
+        }
+    }
+
+    updateTransferReopen();
+}
+
+function transferProgressPct(t) {
+    if (t.total > 0) {
+        return Math.min(100, Math.max(0, (t.transferred / t.total) * 100));
+    }
+    return t.status === 'completed' ? 100 : 0;
+}
+
+function renderTransferRow(t) {
+    const pct = transferProgressPct(t);
+    const actions = transferActionsFor(t);
+    const totalLabel = t.total > 0 ? formatSize(t.total) : 'Unknown';
+    const speed = t.status === 'uploading' || t.status === 'downloading'
+        ? `${formatSize(t.speed || 0)}/s`
+        : (t.status === 'paused' ? 'Paused' : '');
+    const errorLine = t.error
+        ? `<span class="err-msg" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</span>`
+        : '';
+    return `
+        <div class="transfer-row ${escapeHtml(t.status)}" data-id="${escapeHtml(t.id)}">
+            <div class="transfer-row-head">
+                <div class="transfer-row-name">
+                    <i class="fas ${transferKindIcon(t.kind)}"></i>
+                    <span class="filename" title="${escapeHtml(t.filename)}">${escapeHtml(t.filename)}</span>
+                </div>
+                <span class="transfer-row-status ${escapeHtml(t.status)}">${escapeHtml(t.status)}</span>
+            </div>
+            <div class="transfer-row-progress">
+                <div class="transfer-row-progress-bar" style="width:${pct.toFixed(1)}%"></div>
+            </div>
+            <div class="transfer-row-info">
+                <span>${formatSize(t.transferred || 0)} / ${totalLabel}</span>
+                <span>${escapeHtml(speed)}</span>
+                ${errorLine}
+            </div>
+            <div class="transfer-row-actions">
+                ${actions.map(a =>
+                    `<button class="btn ${a === 'cancel' ? 'btn-danger' : 'btn-secondary'}" data-action="${a}" data-id="${escapeHtml(t.id)}">${transferActionLabel(a)}</button>`
+                ).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderSidebarTransferRow(t) {
+    const pct = transferProgressPct(t);
+    const actions = transferActionsFor(t);
+    return `
+        <div class="sidebar-transfer-row ${escapeHtml(t.status)}" data-id="${escapeHtml(t.id)}">
+            <div class="head">
+                <i class="fas ${transferKindIcon(t.kind)}"></i>
+                <span class="name" title="${escapeHtml(t.filename)}">${escapeHtml(t.filename)}</span>
+                <span class="pct">${pct.toFixed(0)}%</span>
+            </div>
+            <div class="bar"><span style="width:${pct.toFixed(1)}%"></span></div>
+            <div class="actions">
+                ${actions.map(a =>
+                    `<button class="${a === 'cancel' ? 'danger' : ''}" data-action="${a}" data-id="${escapeHtml(t.id)}" title="${a}"><i class="fas ${({pause:'fa-pause',resume:'fa-play',cancel:'fa-stop',dismiss:'fa-times',retry:'fa-redo'})[a]}"></i></button>`
+                ).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function attachTransferActionListeners(root) {
+    root.querySelectorAll('button[data-action][data-id]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            dispatchTransferAction(btn.dataset.id, btn.dataset.action);
+        });
+    });
+}
+
+// =============================================================
+// Local file download (with pause / resume / cancel via Range)
+// =============================================================
+function downloadSelectedItem() {
+    if (!state.selectedItem) return;
+    startManagedDownload(state.selectedItem.path, state.selectedItem.name || '');
+}
+
+async function startManagedDownload(serverPath, suggestedName) {
+    const id = 'dl-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const filename = suggestedName || serverPath.split('/').pop() || 'download';
+
+    const transfer = {
+        id,
+        kind: 'download',
+        filename,
+        status: 'pending',
+        transferred: 0,
+        total: 0,
+        speed: 0,
+        startedAt: Date.now(),
+        _abortController: null,
+        _chunks: [],
+        _serverPath: serverPath
+    };
+
+    transfer.cancel = () => {
+        if (transfer._abortController) transfer._abortController.abort();
+        transfer.status = 'cancelled';
+        transfer._chunks = [];
+        renderTransfers();
+    };
+    transfer.pause = () => {
+        if (transfer.status !== 'downloading') return;
+        if (transfer._abortController) transfer._abortController.abort();
+        transfer.status = 'paused';
+        renderTransfers();
+    };
+    transfer.resume = () => {
+        if (transfer.status !== 'paused' && transfer.status !== 'error') return;
+        runDownload(transfer);
+    };
+
+    addTransfer(transfer);
+    runDownload(transfer);
+}
+
+async function runDownload(transfer) {
+    transfer.status = 'downloading';
+    transfer.error = null;
+    transfer._abortController = new AbortController();
+    renderTransfers();
+
+    const url = `/api/download/${encodeURIComponent(transfer._serverPath)
+        .replace(/%2F/gi, '/')}`;
+
+    try {
+        const headers = {};
+        if (transfer.transferred > 0) {
+            headers['Range'] = `bytes=${transfer.transferred}-`;
+        }
+        const response = await fetch(url, {
+            headers,
+            signal: transfer._abortController.signal
+        });
+
+        if (!response.ok && response.status !== 206) {
+            throw new Error(`Server responded with ${response.status}`);
+        }
+
+        // If we asked for a Range but the server returned 200, restart.
+        const rangeHonoured = response.status === 206;
+        if (transfer.transferred > 0 && !rangeHonoured) {
+            transfer._chunks = [];
+            transfer.transferred = 0;
+        }
+
+        // Determine total size from headers.
+        if (rangeHonoured) {
+            const cr = response.headers.get('Content-Range');
+            if (cr) {
+                const m = /\/(\d+)$/.exec(cr);
+                if (m) transfer.total = parseInt(m[1], 10);
+            }
+        } else {
+            const lenHeader = response.headers.get('Content-Length');
+            if (lenHeader) transfer.total = parseInt(lenHeader, 10);
+        }
+
+        // Try to refine the suggested filename from Content-Disposition.
+        const cd = response.headers.get('Content-Disposition');
+        if (cd) {
+            const m = /filename\*?=(?:UTF-8''|")?([^";]+)"?/i.exec(cd);
+            if (m) {
+                try { transfer.filename = decodeURIComponent(m[1]); }
+                catch (e) { transfer.filename = m[1]; }
+            }
+        }
+
+        const reader = response.body.getReader();
+        const start = Date.now();
+        const baseTransferred = transfer.transferred;
+        let receivedSinceStart = 0;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            transfer._chunks.push(value);
+            transfer.transferred += value.length;
+            receivedSinceStart += value.length;
+            const elapsed = (Date.now() - start) / 1000;
+            transfer.speed = elapsed > 0 ? receivedSinceStart / elapsed : 0;
+            renderTransfers();
+        }
+
+        // Stitch into a single Blob and trigger the browser save.
+        const blob = new Blob(transfer._chunks);
+        transfer._chunks = [];
+        transfer.status = 'completed';
+        transfer.speed = 0;
+        renderTransfers();
+
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = transfer.filename;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(a.href);
+            document.body.removeChild(a);
+        }, 0);
+    } catch (err) {
+        if (err.name === 'AbortError') {
+            // status was already set by pause()/cancel()
+            return;
+        }
+        transfer.status = 'error';
+        transfer.error = err.message || String(err);
+        renderTransfers();
+        showToast(`Download failed: ${transfer.error}`, 'error');
+    }
+}
+
+// =============================================================
+// Resumable, chunked upload
+// =============================================================
+const UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024;  // 4 MiB
+
 function handleFileSelection(files) {
     state.uploadFiles = Array.from(files);
-    
+
     let html = '';
     state.uploadFiles.forEach((file, index) => {
         html += `
@@ -797,11 +1238,10 @@ function handleFileSelection(files) {
             </div>
         `;
     });
-    
+
     document.getElementById('uploadFileList').innerHTML = html;
     document.getElementById('startUploadBtn').disabled = state.uploadFiles.length === 0;
-    
-    // Remove file handlers
+
     document.querySelectorAll('.remove-file').forEach(btn => {
         btn.addEventListener('click', () => {
             state.uploadFiles.splice(parseInt(btn.dataset.index), 1);
@@ -810,36 +1250,424 @@ function handleFileSelection(files) {
     });
 }
 
-async function uploadFiles() {
+function uploadFiles() {
     if (state.uploadFiles.length === 0) return;
-    
-    const formData = new FormData();
-    formData.append('path', state.currentPath);
-    state.uploadFiles.forEach(file => {
-        formData.append('files', file);
+    const filesToUpload = state.uploadFiles.slice();
+    state.uploadFiles = [];
+    closeModal('uploadModal');
+    filesToUpload.forEach(file => startManagedUpload(file, state.currentPath));
+    showTransferCenter();
+}
+
+async function startManagedUpload(file, destPath) {
+    const id = 'up-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const transfer = {
+        id,
+        kind: 'upload',
+        filename: file.name,
+        status: 'pending',
+        transferred: 0,
+        total: file.size,
+        speed: 0,
+        startedAt: Date.now(),
+        _file: file,
+        _destPath: destPath,
+        _uploadId: null,
+        _xhr: null,
+        _pauseRequested: false,
+        _cancelRequested: false
+    };
+
+    transfer.pause = () => {
+        transfer._pauseRequested = true;
+        if (transfer._xhr) transfer._xhr.abort();
+        if (transfer.status === 'uploading') {
+            transfer.status = 'paused';
+            renderTransfers();
+        }
+    };
+    transfer.resume = () => {
+        if (transfer.status !== 'paused' && transfer.status !== 'error') return;
+        transfer._pauseRequested = false;
+        runUpload(transfer);
+    };
+    transfer.cancel = async () => {
+        transfer._cancelRequested = true;
+        transfer._pauseRequested = false;
+        if (transfer._xhr) transfer._xhr.abort();
+        transfer.status = 'cancelling';
+        renderTransfers();
+        if (transfer._uploadId) {
+            try {
+                await fetch(`/api/upload-cancel/${transfer._uploadId}`, { method: 'DELETE' });
+            } catch (e) { /* ignore */ }
+        }
+        transfer.status = 'cancelled';
+        renderTransfers();
+    };
+
+    addTransfer(transfer);
+
+    try {
+        const initResponse = await fetch('/api/upload-init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename: file.name,
+                path: destPath,
+                size: file.size
+            })
+        });
+        const initData = await initResponse.json();
+        if (!initResponse.ok) {
+            throw new Error(initData.error || 'Failed to start upload');
+        }
+        transfer._uploadId = initData.upload_id;
+        transfer.filename = initData.filename || transfer.filename;
+    } catch (err) {
+        transfer.status = 'error';
+        transfer.error = err.message;
+        renderTransfers();
+        showToast(`Upload failed to start: ${err.message}`, 'error');
+        return;
+    }
+
+    runUpload(transfer);
+}
+
+function sendChunk(transfer, chunk, start, total) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        transfer._xhr = xhr;
+        xhr.open('PUT', `/api/upload-chunk/${transfer._uploadId}`);
+        xhr.setRequestHeader(
+            'Content-Range',
+            `bytes ${start}-${start + chunk.size - 1}/${total}`
+        );
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        const startTime = Date.now();
+        xhr.upload.onprogress = (e) => {
+            if (!e.lengthComputable) return;
+            transfer.transferred = start + e.loaded;
+            const elapsed = (Date.now() - startTime) / 1000;
+            transfer.speed = elapsed > 0 ? e.loaded / elapsed : 0;
+            renderTransfers();
+        };
+        xhr.onload = () => {
+            transfer._xhr = null;
+            if (xhr.status >= 200 && xhr.status < 300) {
+                resolve(JSON.parse(xhr.responseText || '{}'));
+            } else {
+                let msg = `HTTP ${xhr.status}`;
+                try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
+                reject(new Error(msg));
+            }
+        };
+        xhr.onerror = () => {
+            transfer._xhr = null;
+            reject(new Error('Network error during upload'));
+        };
+        xhr.onabort = () => {
+            transfer._xhr = null;
+            reject(Object.assign(new Error('aborted'), { aborted: true }));
+        };
+        xhr.send(chunk);
     });
-    
+}
+
+async function runUpload(transfer) {
+    transfer.status = 'uploading';
+    transfer.error = null;
+    renderTransfers();
+
+    // Resume from server-known offset if we have an upload session.
+    try {
+        if (transfer._uploadId) {
+            const status = await fetch(`/api/upload-status/${transfer._uploadId}`);
+            if (status.ok) {
+                const data = await status.json();
+                transfer.transferred = data.received || 0;
+            }
+        }
+    } catch (e) { /* ignore */ }
+
+    const file = transfer._file;
+    let offset = transfer.transferred;
+    while (offset < file.size) {
+        if (transfer._cancelRequested) return;
+        if (transfer._pauseRequested) {
+            transfer.status = 'paused';
+            renderTransfers();
+            return;
+        }
+        const end = Math.min(offset + UPLOAD_CHUNK_SIZE, file.size);
+        const chunk = file.slice(offset, end);
+        try {
+            const result = await sendChunk(transfer, chunk, offset, file.size);
+            offset = result.received;
+            transfer.transferred = offset;
+            renderTransfers();
+        } catch (err) {
+            if (err.aborted) {
+                // pause/cancel already updated the status
+                return;
+            }
+            transfer.status = 'error';
+            transfer.error = err.message;
+            transfer.speed = 0;
+            renderTransfers();
+            showToast(`Upload error: ${err.message}`, 'error');
+            return;
+        }
+    }
+
+    try {
+        const completeResponse = await fetch(`/api/upload-complete/${transfer._uploadId}`, {
+            method: 'POST'
+        });
+        const data = await completeResponse.json();
+        if (!completeResponse.ok) {
+            throw new Error(data.error || 'Failed to finalise upload');
+        }
+        transfer.status = 'completed';
+        transfer.speed = 0;
+        transfer.transferred = transfer.total;
+        renderTransfers();
+        // Refresh the directory listing if we uploaded into the
+        // currently-displayed directory.
+        if (transfer._destPath === state.currentPath) {
+            browseDirectory(state.currentPath);
+        }
+    } catch (err) {
+        transfer.status = 'error';
+        transfer.error = err.message;
+        renderTransfers();
+        showToast(`Upload finalisation failed: ${err.message}`, 'error');
+    }
+}
+
+// =============================================================
+// Remote downloads (server-side)
+// =============================================================
+async function startRemoteDownload() {
+    const rawUrls = document.getElementById('downloadUrl').value.trim();
+    const urls = rawUrls
+        .split(/\r?\n|,/)
+        .map(url => url.trim())
+        .filter(Boolean);
+
+    if (!urls.length) {
+        showToast('Please enter at least one URL', 'warning');
+        return;
+    }
+
+    for (const url of urls) {
+        try {
+            const parsedUrl = new URL(url);
+            if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+                showToast('Only HTTP and HTTPS URLs are supported', 'error');
+                return;
+            }
+        } catch (e) {
+            showToast('Invalid URL format: ' + url, 'error');
+            return;
+        }
+    }
+
+    const destination = state.currentPath || serverHome || '~';
+
     showLoading();
     try {
-        const response = await fetch('/api/upload', {
+        const response = await fetch('/api/remote-download', {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls, destination })
         });
-        
         const data = await response.json();
-        
         if (response.ok) {
-            showToast(data.message, 'success');
-            closeModal('uploadModal');
-            browseDirectory(state.currentPath);
+            const count = data.count || (data.task_ids ? data.task_ids.length : 1);
+            showToast(`Started ${count} download(s)`, 'success');
+            document.getElementById('downloadUrl').value = '';
+            closeModal('remoteDownloadModal');
+            // Show transfer center so the user sees progress immediately.
+            showTransferCenter();
+            setTimeout(refreshRemoteDownloads, 300);
         } else {
-            showToast(data.error || 'Upload failed', 'error');
+            showToast(data.error || 'Failed to start download', 'error');
         }
     } catch (error) {
-        showToast('Network error', 'error');
+        console.error('Remote download error:', error);
+        showToast('Network error: ' + error.message, 'error');
     }
     hideLoading();
 }
+
+async function refreshRemoteDownloads() {
+    let tasks;
+    try {
+        const response = await fetch('/api/download-tasks');
+        if (!response.ok) return;
+        tasks = await response.json();
+    } catch (err) {
+        return;
+    }
+    if (!Array.isArray(tasks)) return;
+
+    const seenIds = new Set();
+    tasks.forEach(task => {
+        const id = 'rd-' + task.id;
+        seenIds.add(id);
+        let transfer = state.transfers[id];
+        if (!transfer) {
+            transfer = makeRemoteDownloadTransfer(id, task);
+            state.transfers[id] = transfer;
+        }
+        // Map server status -> transfer status.
+        let status = task.status;
+        if (status === 'pending') status = 'downloading';
+        transfer.status = status;
+        transfer.transferred = task.downloaded || 0;
+        transfer.total = task.total_size || 0;
+        transfer.speed = task.speed || 0;
+        transfer.error = task.error || null;
+        transfer.filename = task.filename || transfer.filename || task.url;
+    });
+
+    // Drop entries for remote-download tasks that the server forgot
+    // about (e.g. dismissed). Local upload/download transfers are kept.
+    Object.keys(state.transfers).forEach(id => {
+        if (id.startsWith('rd-') && !seenIds.has(id)) {
+            delete state.transfers[id];
+        }
+    });
+
+    renderTransfers();
+}
+
+function makeRemoteDownloadTransfer(id, task) {
+    const taskId = task.id;
+    const transfer = {
+        id,
+        kind: 'remote-download',
+        filename: task.filename || task.url || 'remote download',
+        status: task.status,
+        transferred: task.downloaded || 0,
+        total: task.total_size || 0,
+        speed: task.speed || 0,
+        error: task.error || null,
+        startedAt: (task.created_at || Date.now() / 1000) * 1000,
+        _serverTaskId: taskId
+    };
+    transfer.cancel = async () => {
+        try {
+            await fetch(`/api/cancel-download/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+        refreshRemoteDownloads();
+    };
+    transfer.pause = async () => {
+        try {
+            await fetch(`/api/pause-download/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+        refreshRemoteDownloads();
+    };
+    transfer.resume = async () => {
+        try {
+            await fetch(`/api/resume-download/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+        refreshRemoteDownloads();
+    };
+    transfer.dismiss = async () => {
+        try {
+            await fetch(`/api/dismiss-download/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+    };
+    return transfer;
+}
+
+// =============================================================
+// Compress endpoint integration
+// =============================================================
+function showCompressDialog() {
+    const target = state.selectedItem;
+    if (!target) return;
+    const sources = [target.path];
+    document.getElementById('compressSourcesList').innerHTML = sources.map(p => `
+        <div class="item"><i class="fas fa-file-archive"></i> ${escapeHtml(p)}</div>
+    `).join('');
+    const baseName = (target.name || 'archive').replace(/\.[^.]+$/, '');
+    document.getElementById('compressName').value = baseName || 'archive';
+    document.getElementById('compressFormat').value = 'zip';
+    openModal('compressModal');
+}
+
+async function confirmCompress() {
+    const target = state.selectedItem;
+    if (!target) return;
+    const name = document.getElementById('compressName').value.trim();
+    const format = document.getElementById('compressFormat').value;
+
+    showLoading();
+    try {
+        const response = await fetch('/api/compress', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sources: [target.path],
+                destination: state.currentPath,
+                name,
+                format
+            })
+        });
+        const data = await response.json();
+        if (response.ok) {
+            showToast(`Created ${data.name} (${data.size_formatted})`, 'success');
+            closeModal('compressModal');
+            browseDirectory(state.currentPath);
+        } else {
+            showToast(data.error || 'Compression failed', 'error');
+        }
+    } catch (err) {
+        showToast('Network error: ' + err.message, 'error');
+    }
+    hideLoading();
+}
+
+// =============================================================
+// Server info (tunnel)
+// =============================================================
+async function loadServerInfo() {
+    try {
+        const response = await fetch('/api/server-info');
+        if (!response.ok) return;
+        const data = await response.json();
+        renderTunnelInfo(data);
+    } catch (e) { /* ignore */ }
+}
+
+function renderTunnelInfo(info) {
+    if (!elements.tunnelSection || !elements.tunnelStatus || !elements.tunnelUrl) return;
+    if (!info || info.tunnel_status === 'disabled') {
+        elements.tunnelSection.style.display = 'none';
+        return;
+    }
+    elements.tunnelSection.style.display = '';
+    elements.tunnelStatus.className = 'tunnel-status ' + escapeHtml(info.tunnel_status);
+    if (info.tunnel_status === 'active' && info.tunnel_url) {
+        elements.tunnelStatus.textContent = 'Active';
+        elements.tunnelUrl.textContent = info.tunnel_url;
+        elements.tunnelUrl.href = info.tunnel_url;
+    } else if (info.tunnel_status === 'starting') {
+        elements.tunnelStatus.textContent = 'Starting...';
+        elements.tunnelUrl.textContent = '';
+        elements.tunnelUrl.removeAttribute('href');
+    } else if (info.tunnel_status === 'error') {
+        elements.tunnelStatus.textContent = 'Error';
+        elements.tunnelUrl.textContent = info.tunnel_error || 'unknown error';
+        elements.tunnelUrl.removeAttribute('href');
+    }
+}
+
+
 
 // Create Folder
 async function createFolder() {
@@ -1026,164 +1854,6 @@ async function previewFile(path) {
         showToast('Failed to preview file', 'error');
     }
     hideLoading();
-}
-
-// Remote Download
-async function startRemoteDownload() {
-    const rawUrls = document.getElementById('downloadUrl').value.trim();
-    const urls = rawUrls
-        .split(/\r?\n|,/)
-        .map(url => url.trim())
-        .filter(Boolean);
-
-    if (!urls.length) {
-        showToast('Please enter at least one URL', 'warning');
-        return;
-    }
-
-    // Validate URL format
-    for (const url of urls) {
-        try {
-            const parsedUrl = new URL(url);
-            if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-                showToast('Only HTTP and HTTPS URLs are supported', 'error');
-                return;
-            }
-        } catch (e) {
-            showToast('Invalid URL format: ' + url, 'error');
-            return;
-        }
-    }
-
-    const destination = state.currentPath || serverHome || '~';
-    
-    showLoading();
-    try {
-        const response = await fetch('/api/remote-download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                urls: urls,
-                destination: destination
-            })
-        });
-        
-        const data = await response.json();
-        
-        if (response.ok) {
-            const count = data.count || (data.task_ids ? data.task_ids.length : 1);
-            showToast(`Started ${count} download(s)`, 'success');
-            (data.task_ids || [data.task_id]).forEach(taskId => {
-                if (taskId) {
-                    state.downloadTasks[taskId] = true;
-                }
-            });
-            document.getElementById('downloadUrl').value = '';
-            closeModal('remoteDownloadModal');
-            // Immediately update download progress
-            setTimeout(updateDownloadProgress, 500);
-        } else {
-            showToast(data.error || 'Failed to start download', 'error');
-        }
-    } catch (error) {
-        console.error('Remote download error:', error);
-        showToast('Network error: ' + error.message, 'error');
-    }
-    hideLoading();
-}
-
-async function updateDownloadProgress() {
-    try {
-        const response = await fetch('/api/download-tasks');
-        if (!response.ok) {
-            console.error('Failed to fetch download tasks:', response.status);
-            return;
-        }
-        const tasks = await response.json();
-        
-        if (!Array.isArray(tasks)) {
-            console.error('Download tasks response is not an array:', tasks);
-            return;
-        }
-
-        if (elements.opQueue) {
-            const activeCount = tasks.filter(task =>
-                ['pending', 'downloading', 'cancelling'].includes(task.status)
-            ).length;
-            elements.opQueue.textContent = `${activeCount} active`;
-        }
-        
-        let html = '';
-        tasks.forEach(task => {
-            const statusClass = task.status || 'pending';
-            const progress = task.progress || 0;
-            const filename = task.filename || 'Initializing...';
-            const url = task.url || '';
-            
-            html += `
-                <div class="download-item ${statusClass}" data-id="${task.id}">
-                    <div class="download-item-header">
-                        <span class="download-filename" title="${escapeHtml(url)}">
-                            ${escapeHtml(filename)}
-                        </span>
-                        <span class="download-status ${statusClass}">${statusClass}</span>
-                    </div>
-                    <div class="download-progress">
-                        <div class="download-progress-bar" style="width: ${progress}%"></div>
-                    </div>
-                    <div class="download-info">
-                        <span>${task.downloaded_formatted || '0 B'} / ${task.total_size_formatted || 'Unknown'}</span>
-                        <span>${task.speed_formatted || '0 B/s'}</span>
-                    </div>
-                    ${['downloading', 'pending', 'cancelling'].includes(statusClass) ? `
-                        <div class="download-actions">
-                            <button class="btn btn-sm btn-danger" onclick="cancelDownload('${task.id}')">
-                                <i class="fas fa-stop"></i> Cancel
-                            </button>
-                        </div>
-                    ` : ''}
-                    ${statusClass === 'error' ? `
-                        <div class="download-error">
-                            <i class="fas fa-exclamation-circle"></i> ${escapeHtml(task.error || 'Download failed')}
-                        </div>
-                    ` : ''}
-                    ${statusClass === 'cancelled' || statusClass === 'cancelling' ? `
-                        <div class="download-cancelled">
-                            <i class="fas fa-ban"></i> ${statusClass === 'cancelling' ? 'Cancelling...' : 'Cancelled'}
-                        </div>
-                    ` : ''}
-                    ${statusClass === 'completed' ? `
-                        <div class="download-complete">
-                            <i class="fas fa-check-circle"></i> Complete
-                        </div>
-                    ` : ''}
-                </div>
-            `;
-        });
-        
-        if (html) {
-            elements.downloadList.innerHTML = html;
-        } else {
-            elements.downloadList.innerHTML = '<p style="color: var(--text-muted); font-size: 13px; text-align: center; padding: 20px;">No active downloads</p>';
-        }
-    } catch (error) {
-        console.error('Failed to update download progress:', error);
-    }
-}
-
-async function cancelDownload(taskId) {
-    try {
-        const response = await fetch(`/api/cancel-download/${taskId}`, { method: 'POST' });
-        const data = await response.json();
-        if (response.ok) {
-            showToast('Download cancellation requested', 'info');
-            updateDownloadProgress();
-        } else {
-            showToast(data.message || data.error || 'Failed to cancel download', 'warning');
-        }
-    } catch (error) {
-        showToast('Failed to cancel download', 'error');
-    }
 }
 
 // Search Files

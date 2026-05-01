@@ -12,9 +12,23 @@ A **professional web-based file manager** written in Python with Flask. Features
 ## Features
 
 - **Professional Dark Theme UI** - Modern, responsive design
-- **File Upload** - Drag & drop or click to upload files
-- **File Download** - Download files directly from the browser
+- **File Upload** - Drag & drop or click to upload files. Uploads are
+  chunked, with per-file progress, **pause / resume / cancel** controls,
+  and they survive transient connection drops.
+- **File Download** - Download files directly from the browser, with
+  HTTP Range support so the in-browser transfer manager can pause and
+  resume large local downloads.
 - **Remote Download** - Download files from URLs with progress tracking
+  and **pause / resume / cancel** support.
+- **Compress** - Right-click any file or folder and create an archive
+  (`.zip`, `.tar`, `.tar.gz`) directly on the server.
+- **Transfer Center** - Centered, project-themed panel that shows every
+  in-flight transfer (upload, download, remote download). It can be
+  minimised to the sidebar and never gets stuck on a Cancelled / Error
+  state — every row has Pause, Resume, Cancel and Dismiss controls.
+- **Cloudflare Tunnel** - Optional `--tunnel` flag that publishes the
+  server through a free `*.trycloudflare.com` URL alongside the local
+  one. Requires the `cloudflared` binary to be installed on PATH.
 - **File Operations** - Copy, move, rename, delete files and folders
 - **Search** - Quick file search functionality
 - **Context Menu** - Right-click menu with common actions
@@ -47,6 +61,10 @@ filefy --host 127.0.0.1 --port 3000
 
 # Enable debug mode
 filefy --debug
+
+# Also expose the server on a public Cloudflare tunnel
+# (install cloudflared first: https://github.com/cloudflare/cloudflared)
+filefy --tunnel
 ```
 
 Then open your browser and go to: **http://localhost:5000**
@@ -123,7 +141,7 @@ docker run --rm -p 5000:5000 -v "$PWD/data:/data" filefy:local
 ## CLI Usage
 
 ```
-usage: filefy [-h] [-H HOST] [-p PORT] [-d DIR] [--debug] [-v]
+usage: filefy [-h] [-H HOST] [-p PORT] [-d DIR] [--debug] [--tunnel] [-v]
 
 filefy - Professional Web-Based File Manager
 
@@ -133,6 +151,9 @@ options:
   -p, --port PORT       Port to run the server on (default: 5000)
   -d, --dir DIR         Base directory for file management (default: home)
   --debug               Enable Flask debug mode
+  --tunnel              Also publish the server through a Cloudflare quick
+                        tunnel and print the public URL alongside the local
+                        URL. Requires the 'cloudflared' binary on PATH.
   -v, --version         show program's version number and exit
 
 Examples:
@@ -141,6 +162,7 @@ Examples:
   filefy --host 127.0.0.1        Only allow local connections
   filefy -d /home/user/files     Set base directory
   filefy --debug                 Enable Flask debug mode
+  filefy --tunnel                Also expose a public Cloudflare URL
 ```
 
 ## Python API
