@@ -12,15 +12,12 @@ Usage:
 
 import argparse
 import sys
-from pathlib import Path
 
-# Add parent directory to path for config imports
-BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE_DIR))
+from ._version import __version__ as _PACKAGE_VERSION
 
-# Import configuration
+# Import the bundled configuration package
 try:
-    from config import get_settings, get_details
+    from .config import get_settings, get_details
 
     CONFIG_AVAILABLE = True
 except ImportError:
@@ -36,12 +33,12 @@ def main():
         default_host = settings.host
         default_port = settings.port
         default_dir = settings.root_directory
-        version = details.version
+        version = details.version or _PACKAGE_VERSION
     else:
         default_host = "0.0.0.0"
         default_port = 5000
         default_dir = None
-        version = "1.0.0"
+        version = _PACKAGE_VERSION
 
     parser = argparse.ArgumentParser(
         prog="filefy",
@@ -92,6 +89,16 @@ Visit https://github.com/Pymmdrza/filefy for more information.
     )
 
     parser.add_argument(
+        "--tunnel",
+        action="store_true",
+        help=(
+            "Also publish the server through a Cloudflare quick tunnel and "
+            "print the public URL. Requires the 'cloudflared' binary to be "
+            "installed and on PATH. The local URL stays available too."
+        ),
+    )
+
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
@@ -108,6 +115,7 @@ Visit https://github.com/Pymmdrza/filefy for more information.
             port=args.port,
             debug=args.debug,
             base_dir=args.directory,
+            tunnel=args.tunnel,
         )
     except KeyboardInterrupt:
         print("\n\nFilefy stopped. Goodbye!")
