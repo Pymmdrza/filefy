@@ -20,11 +20,11 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-# Add parent directory to path for imports
+# Add project root to path so the bundled `filefy` package is importable
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import config_manager, get_settings
+from filefy.config import config_manager, get_settings
 
 
 class SetupManager:
@@ -119,7 +119,7 @@ class SetupManager:
             "build.json",
         ]
 
-        config_dir = self.base_path / "config"
+        config_dir = self.base_path / "filefy" / "config"
 
         for filename in config_files:
             filepath = config_dir / filename
@@ -219,7 +219,7 @@ class SetupManager:
 
 def create_default_configs() -> None:
     """Create default configuration files if they don't exist."""
-    config_dir = BASE_DIR / "config"
+    config_dir = BASE_DIR / "filefy" / "config"
 
     default_configs = {
         "config.json": {
@@ -324,5 +324,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
