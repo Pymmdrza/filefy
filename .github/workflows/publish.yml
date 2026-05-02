@@ -140,6 +140,8 @@ jobs:
               "filefy/cli.py",
               "filefy/server.py",
               "filefy/_version.py",
+              "filefy/tunnel.py",
+              "filefy/install_cloudflared.py",
               "filefy/config/__init__.py",
               "filefy/config/config_manager.py",
               "filefy/config/details.json",
@@ -148,6 +150,17 @@ jobs:
           missing = [r for r in required if r not in names]
           if missing:
               raise SystemExit(f"Wheel is missing required files: {missing}")
+          # Confirm the cloudflared installer console-script is registered
+          # so `pip install filefy` users get it out-of-the-box.
+          entry_points = [n for n in names if n.endswith("entry_points.txt")]
+          assert entry_points, "Wheel is missing entry_points.txt"
+          with zipfile.ZipFile(wheels[0]) as zf:
+              ep_text = zf.read(entry_points[0]).decode()
+          if "filefy-install-cloudflared" not in ep_text:
+              raise SystemExit(
+                  "Wheel entry_points.txt is missing "
+                  "'filefy-install-cloudflared' console script."
+              )
           print("Wheel contents OK.")
           PY
 
@@ -158,6 +171,12 @@ jobs:
           /tmp/smoke/bin/pip install dist/*.whl
           /tmp/smoke/bin/filefy --version
           /tmp/smoke/bin/filefy --help
+          # The cloudflared installer must be available as a dedicated
+          # console script and must also be importable as a module so
+          # the --tunnel auto-install path works without any extra
+          # dependencies.
+          /tmp/smoke/bin/filefy-install-cloudflared --help
+          /tmp/smoke/bin/python -c "from filefy.install_cloudflared import ensure_cloudflared, main"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
