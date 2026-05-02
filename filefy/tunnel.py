@@ -53,10 +53,24 @@ class CloudflareTunnel:
     binary:
         Optional override for the ``cloudflared`` binary to invoke.
         When not given, the executable is looked up on ``PATH``.
+    auto_install:
+        When ``True`` (default) and ``cloudflared`` cannot be located on
+        ``PATH``, the bundled
+        :func:`filefy.install_cloudflared.ensure_cloudflared` helper is
+        used to download and install it for the current operating
+        system before raising :class:`TunnelError`. Set to ``False`` to
+        disable this behaviour and require manual installation.
     """
 
-    def __init__(self, local_url: str, binary: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        local_url: str,
+        binary: Optional[str] = None,
+        *,
+        auto_install: bool = True,
+    ) -> None:
         self.local_url = local_url
+        self.auto_install = auto_install
         self.binary = binary or shutil.which("cloudflared")
         self._process: Optional[subprocess.Popen[str]] = None
         self._reader_thread: Optional[threading.Thread] = None
@@ -89,9 +103,14 @@ class CloudflareTunnel:
             return
 
         if not self.binary:
+            self.binary = self._auto_install_binary()
+
+        if not self.binary:
             raise TunnelError(
-                "The 'cloudflared' binary was not found on PATH. Install it "
-                "from https://github.com/cloudflare/cloudflared and try again."
+                "The 'cloudflared' binary was not found on PATH and could not "
+                "be installed automatically. Install it manually from "
+                "https://github.com/cloudflare/cloudflared (or run "
+                "'filefy-install-cloudflared') and try again."
             )
 
         cmd = [
@@ -146,6 +165,38 @@ class CloudflareTunnel:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _auto_install_binary(self) -> Optional[str]:
+        """Try to install ``cloudflared`` on demand.
+
+        Returns the absolute path to the installed binary on success, or
+        ``None`` if auto-install is disabled or the installation failed.
+        Errors are logged but never raised so callers can still surface
+        a friendly :class:`TunnelError`.
+        """
+        if not self.auto_install:
+            return None
+
+        try:
+            from .install_cloudflared import (
+                CloudflaredInstallError,
+                ensure_cloudflared,
+            )
+        except Exception:  # pragma: no cover - defensive import guard
+            logger.exception("Could not import the bundled cloudflared installer")
+            return None
+
+        logger.info(
+            "'cloudflared' is not installed. Installing it automatically..."
+        )
+        try:
+            result = ensure_cloudflared()
+        except CloudflaredInstallError as exc:
+            logger.error("Automatic cloudflared installation failed: %s", exc)
+            return None
+
+        logger.info("cloudflared ready at %s", result.path)
+        return str(result.path)
+
     def _consume_output(self) -> None:
         """Read cloudflared output and capture the public URL."""
         proc = self._process

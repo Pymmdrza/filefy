@@ -452,7 +452,10 @@ function renderFileList(items) {
         item.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             selectItem(item);
-            showContextMenu(e.pageX, e.pageY);
+            // Use viewport-relative coordinates because the menu uses
+            // `position: fixed`. `pageX/pageY` would offset by the page
+            // scroll and place the menu off-screen.
+            showContextMenu(e.clientX, e.clientY);
         });
     });
 }
@@ -573,19 +576,48 @@ function showContextMenu(x, y) {
             pasteBtn.classList.add('disabled');
         }
     }
-    
+
+    // Show first so we can measure the actual size.
     elements.contextMenu.style.left = `${x}px`;
     elements.contextMenu.style.top = `${y}px`;
     elements.contextMenu.classList.add('show');
-    
-    // Adjust position if menu goes off screen
+
+    // Resolve the fixed header height from the CSS variable so the menu
+    // can never slide behind it (a common problem when the user
+    // right-clicks near the top of the page and the menu is tall enough
+    // that the off-screen correction below would otherwise push it up
+    // into / above the header).
+    const headerHeightRaw = getComputedStyle(document.documentElement)
+        .getPropertyValue('--header-height') || '60px';
+    const headerHeight = parseInt(headerHeightRaw, 10) || 60;
+    const margin = 8;
+
     const rect = elements.contextMenu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-        elements.contextMenu.style.left = `${x - rect.width}px`;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    let finalX = x;
+    let finalY = y;
+
+    // Horizontal: prefer flipping to the left if there isn't room on
+    // the right, then clamp to the viewport.
+    if (finalX + rect.width + margin > vw) {
+        finalX = Math.max(margin, x - rect.width);
     }
-    if (rect.bottom > window.innerHeight) {
-        elements.contextMenu.style.top = `${y - rect.height}px`;
+    finalX = Math.max(margin, Math.min(finalX, vw - rect.width - margin));
+
+    // Vertical: prefer flipping above the cursor if there isn't room
+    // below, then clamp so the top stays below the header and the
+    // bottom stays inside the viewport.
+    if (finalY + rect.height + margin > vh) {
+        finalY = y - rect.height;
     }
+    const minTop = headerHeight + margin;
+    const maxTop = Math.max(minTop, vh - rect.height - margin);
+    finalY = Math.max(minTop, Math.min(finalY, maxTop));
+
+    elements.contextMenu.style.left = `${finalX}px`;
+    elements.contextMenu.style.top = `${finalY}px`;
 }
 
 function hideContextMenu() {
@@ -914,7 +946,7 @@ function transferActionLabel(action) {
 
 function transferActionsFor(t) {
     const actions = [];
-    if (t.status === 'uploading' || t.status === 'downloading') {
+    if (t.status === 'uploading' || t.status === 'downloading' || t.status === 'running') {
         if (typeof t.pause === 'function') actions.push('pause');
         if (typeof t.cancel === 'function') actions.push('cancel');
     } else if (t.status === 'paused') {
@@ -960,7 +992,8 @@ function transferKindIcon(kind) {
     return {
         upload: 'fa-upload',
         download: 'fa-download',
-        'remote-download': 'fa-cloud-download-alt'
+        'remote-download': 'fa-cloud-download-alt',
+        compress: 'fa-file-archive'
     }[kind] || 'fa-exchange-alt';
 }
 
@@ -1013,7 +1046,7 @@ function renderTransferRow(t) {
     const pct = transferProgressPct(t);
     const actions = transferActionsFor(t);
     const totalLabel = t.total > 0 ? formatSize(t.total) : 'Unknown';
-    const speed = t.status === 'uploading' || t.status === 'downloading'
+    const speed = (t.status === 'uploading' || t.status === 'downloading' || t.status === 'running')
         ? `${formatSize(t.speed || 0)}/s`
         : (t.status === 'paused' ? 'Paused' : '');
     const errorLine = t.error
@@ -1127,8 +1160,7 @@ async function runDownload(transfer) {
     transfer._abortController = new AbortController();
     renderTransfers();
 
-    const url = `/api/download/${encodeURIComponent(transfer._serverPath)
-        .replace(/%2F/gi, '/')}`;
+    const url = `/api/download?path=${encodeURIComponent(transfer._serverPath)}`;
 
     try {
         const headers = {};
@@ -1606,9 +1638,9 @@ async function confirmCompress() {
     const name = document.getElementById('compressName').value.trim();
     const format = document.getElementById('compressFormat').value;
 
-    showLoading();
+    let response, data;
     try {
-        const response = await fetch('/api/compress', {
+        response = await fetch('/api/compress', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1618,18 +1650,113 @@ async function confirmCompress() {
                 format
             })
         });
-        const data = await response.json();
-        if (response.ok) {
-            showToast(`Created ${data.name} (${data.size_formatted})`, 'success');
-            closeModal('compressModal');
-            browseDirectory(state.currentPath);
-        } else {
-            showToast(data.error || 'Compression failed', 'error');
-        }
+        data = await response.json();
     } catch (err) {
         showToast('Network error: ' + err.message, 'error');
+        return;
     }
-    hideLoading();
+
+    if (!response.ok || !data.task_id) {
+        showToast(data && data.error ? data.error : 'Compression failed', 'error');
+        return;
+    }
+
+    // Compression now runs in the background on the server. Register a
+    // transfer in the transfer center and poll the progress endpoint so
+    // the user gets a real progress bar instead of an opaque spinner.
+    closeModal('compressModal');
+    startCompressionTransfer(data);
+}
+
+const COMPRESS_PROGRESS_POLL_MS = 750;
+
+function startCompressionTransfer(initial) {
+    const id = 'cmp-' + initial.task_id;
+    const transfer = {
+        id,
+        kind: 'compress',
+        filename: initial.name || 'archive',
+        status: 'running',
+        transferred: 0,
+        total: initial.total_size || 0,
+        speed: 0,
+        startedAt: Date.now(),
+        _taskId: initial.task_id,
+        _format: initial.format || ''
+    };
+    transfer.cancel = async () => {
+        try {
+            await fetch(`/api/cancel-compress/${transfer._taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+    };
+    addTransfer(transfer);
+    showTransferCenter();
+    pollCompressionTransfer(transfer);
+}
+
+async function pollCompressionTransfer(transfer) {
+    let lastProcessed = 0;
+    let lastTimestamp = Date.now();
+    while (true) {
+        let resp;
+        try {
+            resp = await fetch(`/api/compress-progress/${transfer._taskId}`);
+        } catch (e) {
+            transfer.status = 'error';
+            transfer.error = 'Lost connection to server';
+            renderTransfers();
+            return;
+        }
+        if (!resp.ok) {
+            transfer.status = 'error';
+            transfer.error = `Server responded with ${resp.status}`;
+            renderTransfers();
+            return;
+        }
+        const info = await resp.json();
+        transfer.total = info.total_size || transfer.total;
+        transfer.transferred = info.processed_size || 0;
+        transfer.filename = info.name || transfer.filename;
+        transfer._currentFile = info.current_file || '';
+
+        const now = Date.now();
+        const elapsed = (now - lastTimestamp) / 1000;
+        if (elapsed > 0.25) {
+            transfer.speed = (transfer.transferred - lastProcessed) / elapsed;
+            lastProcessed = transfer.transferred;
+            lastTimestamp = now;
+        }
+
+        if (info.status === 'completed') {
+            transfer.status = 'completed';
+            transfer.transferred = info.size || transfer.total || transfer.transferred;
+            transfer.total = transfer.transferred || transfer.total;
+            transfer.speed = 0;
+            renderTransfers();
+            const sizeLabel = info.size_formatted || formatSize(transfer.transferred);
+            showToast(`Created ${transfer.filename} (${sizeLabel})`, 'success');
+            browseDirectory(state.currentPath);
+            return;
+        }
+        if (info.status === 'error') {
+            transfer.status = 'error';
+            transfer.error = info.error || 'Compression failed';
+            transfer.speed = 0;
+            renderTransfers();
+            showToast(`Compression failed: ${transfer.error}`, 'error');
+            return;
+        }
+        if (info.status === 'cancelled') {
+            transfer.status = 'cancelled';
+            transfer.speed = 0;
+            renderTransfers();
+            return;
+        }
+        // 'pending' / 'running' / 'cancelling'
+        transfer.status = info.status === 'cancelling' ? 'cancelling' : 'running';
+        renderTransfers();
+        await new Promise(r => setTimeout(r, COMPRESS_PROGRESS_POLL_MS));
+    }
 }
 
 // =============================================================

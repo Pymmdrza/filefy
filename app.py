@@ -403,9 +403,21 @@ def upload():
     )
 
 
-@app.route("/api/download/<path:file_path>")
+@app.route("/api/download", defaults={"file_path": None}, strict_slashes=False)
+@app.route("/api/download/<path:file_path>", strict_slashes=False)
 def download(file_path):
-    """Download a file"""
+    """Download a file.
+
+    The path may be supplied positionally or via the ``?path=`` query
+    string. The query form is required for absolute server paths
+    because Werkzeug collapses ``//`` in URLs and silently drops the
+    leading ``/`` of an absolute path.
+    """
+    if not file_path:
+        file_path = request.args.get("path", "")
+    if not file_path:
+        return jsonify({"error": "File not found"}), 404
+
     safe_path = get_safe_path(file_path)
 
     if not os.path.exists(safe_path):
