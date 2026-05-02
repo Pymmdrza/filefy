@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import string
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -1153,6 +1154,259 @@ def _serialize_compression_task(task):
     }
 
 
+def _detect_native_archive_tools():
+    """Locate the system archive tools we know how to drive.
+
+    Resolved once at import-time so the per-task overhead is just a dict
+    lookup. Returns absolute paths (or ``None`` per tool if missing).
+    """
+    return {
+        "tar": shutil.which("tar"),
+        "zip": shutil.which("zip"),
+        "pigz": shutil.which("pigz"),
+    }
+
+
+_NATIVE_ARCHIVE_TOOLS = _detect_native_archive_tools()
+
+
+# Matches a verbose ``zip`` line such as
+#   "  adding: dir/file.txt (deflated 64%)"
+#   "updating: dir/file.txt (stored 0%)"
+_ZIP_VERBOSE_RE = re.compile(
+    r"^\s*(?:adding|updating|freshening|copying):\s+(.+?)(?:\s+\([^)]*\))?\s*$"
+)
+
+
+def _parse_archive_verbose_line(line, fmt):
+    """Return the file path mentioned on an archiver's verbose line, or None.
+
+    ``tar`` prints one path per line; ``zip`` prefixes each with
+    ``adding: `` (or ``updating: ``) and may suffix it with a compression
+    note in parentheses.
+    """
+    if not line:
+        return None
+    line = line.rstrip("\r\n")
+    if not line.strip():
+        return None
+    if fmt == "zip":
+        match = _ZIP_VERBOSE_RE.match(line)
+        return match.group(1) if match else None
+    # tar verbose output is just the archive member name per line.
+    return line.strip()
+
+
+def _build_native_archive_invocations(fmt, archive_path, safe_sources):
+    """Build the subprocess invocations needed to produce ``archive_path``.
+
+    Returns a list of ``(cmd, cwd)`` tuples to run in order, or ``None``
+    when the required native tool is unavailable for ``fmt``. Each
+    command is responsible for either creating or appending to
+    ``archive_path``; for ``tar.gz`` the entire archive is built by a
+    single invocation since gzip streams cannot be cleanly appended.
+    """
+    tar_bin = _NATIVE_ARCHIVE_TOOLS.get("tar")
+    zip_bin = _NATIVE_ARCHIVE_TOOLS.get("zip")
+    pigz_bin = _NATIVE_ARCHIVE_TOOLS.get("pigz")
+
+    invocations = []
+
+    if fmt == "zip":
+        if not zip_bin:
+            return None
+        # ``zip -r out.zip name`` run with cwd=parent appends ``name``
+        # (and its tree) to ``out.zip``, creating it on the first run.
+        for src in safe_sources:
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
+            if not base:
+                # Refuse to compress filesystem roots; the caller's
+                # ``get_safe_path`` should already prevent this.
+                return None
+            cmd = [zip_bin, "-r", "-y", archive_path, base]
+            invocations.append((cmd, parent))
+        return invocations
+
+    if fmt == "tar":
+        if not tar_bin:
+            return None
+        for index, src in enumerate(safe_sources):
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
+            if not base:
+                return None
+            mode_flag = "-cvf" if index == 0 else "-rvf"
+            cmd = [tar_bin, mode_flag, archive_path, "-C", parent, base]
+            invocations.append((cmd, None))
+        return invocations
+
+    if fmt == "tar.gz":
+        if not tar_bin:
+            return None
+        cmd = [tar_bin]
+        if pigz_bin:
+            # ``pigz`` is a parallel gzip implementation; using it
+            # roughly multiplies throughput by the available CPU count.
+            cmd += ["--use-compress-program", pigz_bin]
+            cmd += ["-cvf", archive_path]
+        else:
+            cmd += ["-czvf", archive_path]
+        for src in safe_sources:
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
+            if not base:
+                return None
+            cmd += ["-C", parent, base]
+        invocations.append((cmd, None))
+        return invocations
+
+    return None
+
+
+def _run_native_archive(task_id, archive_path, fmt, safe_sources,
+                        total_files, total_size):
+    """Build the archive using the system's native tools.
+
+    Returns ``True`` on success, ``False`` if no native tool is
+    available for ``fmt`` (so the caller can fall back to the
+    pure-Python builder). Raises :class:`_CompressionCancelled` when the
+    task is cancelled mid-flight; lets unexpected errors propagate so
+    the caller can surface them through the task record.
+    """
+    invocations = _build_native_archive_invocations(
+        fmt, archive_path, safe_sources
+    )
+    if not invocations:
+        return False
+
+    # ``reserve_download_path`` pre-creates a zero-byte placeholder so the
+    # filename is unique. Native ``zip`` would interpret that empty file
+    # as a corrupt archive and exit with status 3, and ``tar`` would
+    # silently overwrite it, so just remove it before we start.
+    try:
+        os.remove(archive_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug("Could not remove placeholder %s", archive_path,
+                     exc_info=True)
+
+    state = {
+        "processed_files": 0,
+        "stop_watcher": False,
+        "process": None,
+        "process_lock": threading.Lock(),
+    }
+
+    def is_cancelled():
+        cur = _get_compression_task(task_id)
+        return bool(cur and cur.get("cancelled"))
+
+    def terminate_running():
+        with state["process_lock"]:
+            proc = state["process"]
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except (ProcessLookupError, OSError):  # pragma: no cover
+                    logger.debug("terminate() failed", exc_info=True)
+
+    def watcher():
+        # Polls the archive's on-disk size so the JS transfer-center can
+        # render a meaningful bytes/sec speed indicator even when we are
+        # streaming through gzip and the per-file accounting underpaces
+        # the actual data flowing into the archive.
+        while not state["stop_watcher"]:
+            try:
+                size = os.path.getsize(archive_path)
+            except OSError:
+                size = None
+            if size is not None:
+                _update_compression_task(task_id, processed_size=size)
+            if is_cancelled():
+                terminate_running()
+                return
+            time.sleep(0.5)
+
+    watcher_thread = threading.Thread(target=watcher, daemon=True)
+    watcher_thread.start()
+
+    try:
+        for cmd, cwd in invocations:
+            if is_cancelled():
+                raise _CompressionCancelled()
+            logger.info("Compressing with native tool: %s", " ".join(cmd))
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                errors="replace",
+            )
+            with state["process_lock"]:
+                state["process"] = proc
+
+            try:
+                assert proc.stdout is not None  # for type-checkers
+                for raw_line in proc.stdout:
+                    if is_cancelled():
+                        terminate_running()
+                        break
+                    name = _parse_archive_verbose_line(raw_line, fmt)
+                    if not name:
+                        continue
+                    state["processed_files"] += 1
+                    progress = 0.0
+                    if total_files > 0:
+                        progress = min(
+                            PROGRESS_CAP_BEFORE_COMPLETE,
+                            (state["processed_files"] / total_files) * 100,
+                        )
+                    _update_compression_task(
+                        task_id,
+                        processed_files=state["processed_files"],
+                        current_file=os.path.basename(name.rstrip("/\\")),
+                        progress=progress,
+                    )
+            finally:
+                proc.wait()
+                with state["process_lock"]:
+                    state["process"] = None
+
+            if is_cancelled():
+                raise _CompressionCancelled()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"{os.path.basename(cmd[0])} exited with status "
+                    f"{proc.returncode}"
+                )
+    finally:
+        state["stop_watcher"] = True
+        watcher_thread.join(timeout=2)
+
+    # Final on-disk size is the most accurate processed_size we have;
+    # for compressed formats (tar.gz, zip+deflate) it is smaller than
+    # the uncompressed input, so we clamp to ``total_size`` so that the
+    # transfer-center UI reaches a clean 100% and existing API consumers
+    # which rely on ``processed_size >= total_size`` at completion stay
+    # consistent with the pure-Python code path.
+    try:
+        final_archive_size = os.path.getsize(archive_path)
+    except OSError:
+        final_archive_size = 0
+    _update_compression_task(
+        task_id,
+        processed_size=max(final_archive_size, total_size),
+    )
+    return True
+
+
 def _compress_task_runner(task_id):
     """Worker function: build the archive and update progress."""
     snapshot = _get_compression_task(task_id) or {}
@@ -1195,28 +1449,65 @@ def _compress_task_runner(task_id):
 
     _update_compression_task(task_id, status="running")
     try:
-        if tar_mode is None:
-            with zipfile.ZipFile(
-                archive_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
-            ) as zf:
-                for src in safe_sources:
-                    _add_path_to_zip(
-                        zf,
-                        src,
-                        os.path.basename(src),
-                        on_file=on_file,
-                        should_cancel=should_cancel,
-                    )
-        else:
-            with tarfile.open(archive_path, tar_mode) as tf:
-                for src in safe_sources:
-                    _add_path_to_tar(
-                        tf,
-                        src,
-                        os.path.basename(src),
-                        on_file=on_file,
-                        should_cancel=should_cancel,
-                    )
+        # Prefer the system's native archiver: pure-Python ``tarfile``/
+        # ``zipfile`` are roughly 1-2 orders of magnitude slower than
+        # ``tar``/``gzip``/``zip`` for large trees, which made multi-GB
+        # archives effectively unusable from the web UI. We only fall
+        # back to the in-process implementation when the native binary
+        # is missing (e.g. minimal Windows installs).
+        used_native = False
+        try:
+            used_native = _run_native_archive(
+                task_id,
+                archive_path,
+                fmt,
+                safe_sources,
+                snapshot.get("total_files") or 0,
+                snapshot.get("total_size") or 0,
+            )
+        except _CompressionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "Native archiver failed for %s; falling back to pure-Python",
+                archive_path,
+            )
+            # Reset any partially written archive so the fallback starts
+            # from a clean slate, and rewind the per-task counters so
+            # the progress bar doesn't double-count work.
+            cleanup_download_files(archive_path)
+            _update_compression_task(
+                task_id,
+                processed_size=0,
+                processed_files=0,
+                progress=0.0,
+                current_file="",
+            )
+            used_native = False
+
+        if not used_native:
+            if tar_mode is None:
+                with zipfile.ZipFile(
+                    archive_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+                ) as zf:
+                    for src in safe_sources:
+                        _add_path_to_zip(
+                            zf,
+                            src,
+                            os.path.basename(src),
+                            on_file=on_file,
+                            should_cancel=should_cancel,
+                        )
+            else:
+                with tarfile.open(archive_path, tar_mode) as tf:
+                    for src in safe_sources:
+                        _add_path_to_tar(
+                            tf,
+                            src,
+                            os.path.basename(src),
+                            on_file=on_file,
+                            should_cancel=should_cancel,
+                        )
     except _CompressionCancelled:
         cleanup_download_files(archive_path)
         _update_compression_task(
