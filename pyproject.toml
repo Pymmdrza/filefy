@@ -67,6 +67,7 @@ Changelog = "https://github.com/Pymmdrza/filefy/releases"
 
 [project.scripts]
 filefy = "filefy.cli:main"
+filefy-install-cloudflared = "filefy.install_cloudflared:main"
 
 [tool.setuptools]
 include-package-data = true
