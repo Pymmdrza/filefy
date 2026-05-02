@@ -46,6 +46,13 @@ COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install /tmp/*.whl \
     && rm -f /tmp/*.whl
 
+# Pre-install the 'cloudflared' binary using the bundled installer so the
+# --tunnel feature works out-of-the-box without any manual intervention
+# from the user. The installer uses the standard library only, so no
+# extra Python packages are required at this point.
+RUN filefy-install-cloudflared --no-package-manager \
+    && cloudflared --version
+
 WORKDIR /data
 USER filefy
 
