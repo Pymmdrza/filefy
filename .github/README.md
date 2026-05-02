@@ -8,7 +8,7 @@
 
 A **professional web-based file manager** written in Python with Flask. Features a beautiful dark theme UI, file upload/download, remote URL downloads with progress tracking, and comprehensive file operations.
 
-![FileFy Modern File Manager](.github/home-screen.png 'FileFy Modern flask file Manager')
+![FileFy Modern File Manager](./home-screen.png 'FileFy Modern flask file Manager')
 
 ## Features
 
