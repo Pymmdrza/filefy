@@ -214,7 +214,7 @@ pip install -e ".[dev]"
 ```
 
 >[!NOTE]
-> More details about [API](.API.md)
+> More details about [API](https://github.com/Pymmdrza/filefy/blob/main/.github/API.md)
 
 
 ## License
