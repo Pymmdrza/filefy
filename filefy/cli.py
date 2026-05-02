@@ -99,6 +99,16 @@ Visit https://github.com/Pymmdrza/filefy for more information.
     )
 
     parser.add_argument(
+        "--install-cloudflared",
+        action="store_true",
+        help=(
+            "Install the 'cloudflared' binary for the current operating "
+            "system and exit. Useful as a one-shot prerequisite step "
+            "before using --tunnel."
+        ),
+    )
+
+    parser.add_argument(
         "-v",
         "--version",
         action="version",
@@ -106,6 +116,11 @@ Visit https://github.com/Pymmdrza/filefy for more information.
     )
 
     args = parser.parse_args()
+
+    if args.install_cloudflared:
+        from .install_cloudflared import main as install_main
+
+        sys.exit(install_main())
 
     try:
         from .server import run
