@@ -96,6 +96,13 @@ DOWNLOAD_CHUNK_SIZE = 1024 * 256
 DOWNLOAD_TIMEOUT = (10, 15)
 DOWNLOAD_MAX_BATCH = 20
 PROGRESS_CAP_BEFORE_COMPLETE = 99.9
+
+# Store progress for archive (compress) tasks. The archive is built in a
+# background thread so the HTTP request returns immediately and the
+# browser-side transfer center can poll for live progress instead of
+# being stuck on a spinner for the entire duration of a multi-GB build.
+compression_tasks = {}
+compression_tasks_lock = threading.RLock()
 DOWNLOAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -688,15 +695,29 @@ def upload():
     )
 
 
-@app.route("/api/download/<path:file_path>")
+@app.route("/api/download", defaults={"file_path": None}, strict_slashes=False)
+@app.route("/api/download/<path:file_path>", strict_slashes=False)
 def download(file_path):
     """Download a file, with HTTP Range support so large transfers can be
     paused / resumed by the browser-side transfer manager.
+
+    The path may be supplied either positionally
+    (``/api/download/<path>``) or via the ``?path=`` query string. The
+    query-string form is required for absolute server paths because
+    Werkzeug's ``merge_slashes`` redirect collapses
+    ``/api/download//abs/path`` to ``/api/download/abs/path``, silently
+    dropping the leading ``/`` and causing the download to fail with a
+    404 on user-installed servers.
 
     Folders are streamed as a freshly-built ``.zip`` archive. Range
     requests on archives fall back to a non-resumable download because
     the archive is rebuilt on each request.
     """
+    if not file_path:
+        file_path = request.args.get("path", "")
+    if not file_path:
+        return jsonify({"error": "File not found"}), 404
+
     safe_path = get_safe_path(file_path)
 
     if not os.path.exists(safe_path):
@@ -962,19 +983,33 @@ _ARCHIVE_FORMATS = {
 }
 
 
-def _add_path_to_zip(zf, source, arcname_root):
+def _add_path_to_zip(zf, source, arcname_root, on_file=None, should_cancel=None):
     """Add ``source`` (a file or a directory tree) to an open ``zipfile``.
 
     ``arcname_root`` is the in-archive name to use for ``source`` itself;
     nested entries are placed under that name with their relative path
     preserved.
+
+    When supplied, ``on_file(full_path, file_size_bytes)`` is invoked
+    after each file has been written so the caller can update progress.
+    ``should_cancel()`` is polled before each file and a truthy return
+    value aborts the walk by raising ``_CompressionCancelled``.
     """
     if os.path.isfile(source):
+        if should_cancel and should_cancel():
+            raise _CompressionCancelled()
         zf.write(source, arcname_root)
+        if on_file:
+            try:
+                on_file(source, os.path.getsize(source))
+            except OSError:
+                on_file(source, 0)
         return
     for root, _dirs, files in os.walk(source):
         rel_root = os.path.relpath(root, source)
         for name in files:
+            if should_cancel and should_cancel():
+                raise _CompressionCancelled()
             full = os.path.join(root, name)
             arc = (
                 arcname_root
@@ -983,11 +1018,236 @@ def _add_path_to_zip(zf, source, arcname_root):
             )
             arc = os.path.join(arc, name)
             zf.write(full, arc)
+            if on_file:
+                try:
+                    on_file(full, os.path.getsize(full))
+                except OSError:
+                    on_file(full, 0)
 
 
-def _add_path_to_tar(tf, source, arcname_root):
-    """Add ``source`` (file or directory) recursively to an open tarfile."""
-    tf.add(source, arcname=arcname_root, recursive=True)
+def _add_path_to_tar(tf, source, arcname_root, on_file=None, should_cancel=None):
+    """Add ``source`` (file or directory) to an open tarfile.
+
+    Unlike :py:meth:`tarfile.TarFile.add` with ``recursive=True``, this
+    walks the tree manually so we can report progress per file and honour
+    a cancellation flag.
+    """
+    if os.path.isfile(source) or os.path.islink(source):
+        if should_cancel and should_cancel():
+            raise _CompressionCancelled()
+        tf.add(source, arcname=arcname_root, recursive=False)
+        if on_file:
+            try:
+                size = os.path.getsize(source) if os.path.isfile(source) else 0
+            except OSError:
+                size = 0
+            on_file(source, size)
+        return
+
+    # Directory: add the directory entry itself, then recurse manually.
+    if should_cancel and should_cancel():
+        raise _CompressionCancelled()
+    tf.add(source, arcname=arcname_root, recursive=False)
+    if on_file:
+        on_file(source, 0)
+    for root, dirs, files in os.walk(source):
+        rel_root = os.path.relpath(root, source)
+        for name in dirs:
+            if should_cancel and should_cancel():
+                raise _CompressionCancelled()
+            full = os.path.join(root, name)
+            arc = (
+                os.path.join(arcname_root, name)
+                if rel_root == "."
+                else os.path.join(arcname_root, rel_root, name)
+            )
+            tf.add(full, arcname=arc, recursive=False)
+            if on_file:
+                on_file(full, 0)
+        for name in files:
+            if should_cancel and should_cancel():
+                raise _CompressionCancelled()
+            full = os.path.join(root, name)
+            arc = (
+                os.path.join(arcname_root, name)
+                if rel_root == "."
+                else os.path.join(arcname_root, rel_root, name)
+            )
+            tf.add(full, arcname=arc, recursive=False)
+            if on_file:
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                on_file(full, size)
+
+
+class _CompressionCancelled(Exception):
+    """Raised internally to bail out of an archive build cooperatively."""
+
+
+def _scan_sources_for_progress(sources):
+    """Pre-walk ``sources`` to compute total file count and byte size.
+
+    Returns ``(total_files, total_bytes)``. Errors while stat'ing
+    individual files are tolerated so a partially-readable tree still
+    yields a useful progress denominator.
+    """
+    total_files = 0
+    total_bytes = 0
+    for src in sources:
+        if os.path.isfile(src):
+            total_files += 1
+            try:
+                total_bytes += os.path.getsize(src)
+            except OSError:
+                pass
+            continue
+        for root, _dirs, files in os.walk(src):
+            for name in files:
+                total_files += 1
+                try:
+                    total_bytes += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+    return total_files, total_bytes
+
+
+def _update_compression_task(task_id, **updates):
+    """Thread-safe partial update of an entry in ``compression_tasks``."""
+    with compression_tasks_lock:
+        if task_id in compression_tasks:
+            compression_tasks[task_id].update(updates)
+
+
+def _get_compression_task(task_id):
+    with compression_tasks_lock:
+        return dict(compression_tasks.get(task_id, {})) or None
+
+
+def _serialize_compression_task(task):
+    """Return the JSON-friendly view of a compression task."""
+    total_size = task.get("total_size") or 0
+    processed = task.get("processed_size") or 0
+    progress = task.get("progress") or 0.0
+    return {
+        "id": task["id"],
+        "status": task.get("status", "pending"),
+        "progress": progress,
+        "processed_size": processed,
+        "processed_size_formatted": format_size(processed),
+        "total_size": total_size,
+        "total_size_formatted": format_size(total_size) if total_size else "Unknown",
+        "processed_files": task.get("processed_files", 0),
+        "total_files": task.get("total_files", 0),
+        "current_file": task.get("current_file") or "",
+        "name": task.get("name", ""),
+        "format": task.get("format", ""),
+        "archive": task.get("archive_path") or "",
+        "error": task.get("error"),
+        "size": task.get("final_size"),
+        "size_formatted": (
+            format_size(task["final_size"]) if task.get("final_size") else None
+        ),
+        "started_at": task.get("started_at"),
+    }
+
+
+def _compress_task_runner(task_id):
+    """Worker function: build the archive and update progress."""
+    snapshot = _get_compression_task(task_id) or {}
+    archive_path = snapshot.get("archive_path")
+    safe_sources = snapshot.get("safe_sources") or []
+    fmt = snapshot.get("format")
+    extension, tar_mode = _ARCHIVE_FORMATS[fmt]
+
+    def should_cancel():
+        cur = _get_compression_task(task_id)
+        return bool(cur and cur.get("cancelled"))
+
+    def on_file(path, size):
+        cur = _get_compression_task(task_id)
+        if not cur:
+            return
+        processed_size = (cur.get("processed_size") or 0) + (size or 0)
+        processed_files = (cur.get("processed_files") or 0) + 1
+        total_size = cur.get("total_size") or 0
+        total_files = cur.get("total_files") or 0
+        if total_size > 0:
+            progress = min(
+                PROGRESS_CAP_BEFORE_COMPLETE,
+                (processed_size / total_size) * 100,
+            )
+        elif total_files > 0:
+            progress = min(
+                PROGRESS_CAP_BEFORE_COMPLETE,
+                (processed_files / total_files) * 100,
+            )
+        else:
+            progress = 0.0
+        _update_compression_task(
+            task_id,
+            processed_size=processed_size,
+            processed_files=processed_files,
+            current_file=os.path.basename(path),
+            progress=progress,
+        )
+
+    _update_compression_task(task_id, status="running")
+    try:
+        if tar_mode is None:
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+            ) as zf:
+                for src in safe_sources:
+                    _add_path_to_zip(
+                        zf,
+                        src,
+                        os.path.basename(src),
+                        on_file=on_file,
+                        should_cancel=should_cancel,
+                    )
+        else:
+            with tarfile.open(archive_path, tar_mode) as tf:
+                for src in safe_sources:
+                    _add_path_to_tar(
+                        tf,
+                        src,
+                        os.path.basename(src),
+                        on_file=on_file,
+                        should_cancel=should_cancel,
+                    )
+    except _CompressionCancelled:
+        cleanup_download_files(archive_path)
+        _update_compression_task(
+            task_id,
+            status="cancelled",
+            progress=0.0,
+            current_file="",
+        )
+        return
+    except Exception as exc:
+        cleanup_download_files(archive_path)
+        logger.exception("Failed to build archive at %s", archive_path)
+        _update_compression_task(
+            task_id,
+            status="error",
+            error=str(exc) or "Failed to build archive",
+            current_file="",
+        )
+        return
+
+    try:
+        final_size = os.path.getsize(archive_path)
+    except OSError:
+        final_size = 0
+    _update_compression_task(
+        task_id,
+        status="completed",
+        progress=100.0,
+        final_size=final_size,
+        current_file="",
+    )
 
 
 @app.route("/api/compress", methods=["POST"])
@@ -1003,7 +1263,9 @@ def compress():
           "format":      "zip" | "tar" | "tar.gz"
         }
 
-    On success returns the path of the produced archive and its size.
+    The archive is built in a background thread; this endpoint returns
+    immediately with a ``task_id`` that the client can poll via
+    :func:`compress_progress` to drive a real progress bar in the UI.
     """
     data = request.get_json(silent=True) or {}
 
@@ -1043,35 +1305,79 @@ def compress():
         name = os.path.basename(os.path.normpath(safe_sources[0])) or "archive"
     name = secure_filename(name) or "archive"
 
-    extension, tar_mode = _ARCHIVE_FORMATS[fmt]
+    extension, _tar_mode = _ARCHIVE_FORMATS[fmt]
     archive_path = reserve_download_path(safe_destination, name + extension)
 
+    # Pre-scan so the progress bar has a real denominator. This is fast
+    # compared to the actual compression even for huge trees because it
+    # only stats files.
     try:
-        if tar_mode is None:
-            with zipfile.ZipFile(
-                archive_path, "w", compression=zipfile.ZIP_DEFLATED
-            ) as zf:
-                for src in safe_sources:
-                    _add_path_to_zip(zf, src, os.path.basename(src))
-        else:
-            with tarfile.open(archive_path, tar_mode) as tf:
-                for src in safe_sources:
-                    _add_path_to_tar(tf, src, os.path.basename(src))
+        total_files, total_size = _scan_sources_for_progress(safe_sources)
     except Exception:
+        logger.exception("Failed to pre-scan sources for compression")
         cleanup_download_files(archive_path)
-        logger.exception("Failed to build archive at %s", archive_path)
-        return jsonify({"error": "Failed to build archive"}), 500
+        return jsonify({"error": "Failed to inspect source paths"}), 500
 
-    size = os.path.getsize(archive_path)
+    task_id = str(uuid.uuid4())
+    archive_filename = os.path.basename(archive_path)
+    task = {
+        "id": task_id,
+        "status": "pending",
+        "progress": 0.0,
+        "processed_size": 0,
+        "processed_files": 0,
+        "total_size": total_size,
+        "total_files": total_files,
+        "current_file": "",
+        "name": archive_filename,
+        "format": fmt,
+        "archive_path": archive_path,
+        "safe_sources": safe_sources,
+        "cancelled": False,
+        "error": None,
+        "final_size": None,
+        "started_at": time.time(),
+    }
+    with compression_tasks_lock:
+        compression_tasks[task_id] = task
+
+    thread = threading.Thread(target=_compress_task_runner, args=(task_id,))
+    thread.daemon = True
+    thread.start()
+
     return jsonify(
         {
-            "archive": archive_path,
-            "name": os.path.basename(archive_path),
-            "size": size,
-            "size_formatted": format_size(size),
+            "task_id": task_id,
+            "name": archive_filename,
             "format": fmt,
+            "total_size": total_size,
+            "total_size_formatted": (
+                format_size(total_size) if total_size else "Unknown"
+            ),
+            "total_files": total_files,
         }
     )
+
+
+@app.route("/api/compress-progress/<task_id>")
+def compress_progress(task_id):
+    """Return progress information for a running archive build."""
+    task = _get_compression_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    return jsonify(_serialize_compression_task(task))
+
+
+@app.route("/api/cancel-compress/<task_id>", methods=["POST"])
+def cancel_compress(task_id):
+    """Request cancellation of a running compression task."""
+    task = _get_compression_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    if task.get("status") in {"completed", "error", "cancelled"}:
+        return jsonify({"message": "Task is already finished"}), 409
+    _update_compression_task(task_id, cancelled=True, status="cancelling")
+    return jsonify({"message": "Cancellation requested"})
 
 
 # ---------------------------------------------------------------------------

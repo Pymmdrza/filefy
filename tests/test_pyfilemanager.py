@@ -403,6 +403,20 @@ class TestCompressEndpoint:
         sub.mkdir()
         Path(sub, "c.txt").write_text("nested")
 
+    def _wait_for_compress(self, client, task_id, timeout=10):
+        """Poll the progress endpoint until the compression task ends."""
+        import time as _time
+
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            resp = client.get(f"/api/compress-progress/{task_id}")
+            assert resp.status_code == 200, resp.get_json()
+            info = resp.get_json()
+            if info["status"] in {"completed", "error", "cancelled"}:
+                return info
+            _time.sleep(0.05)
+        raise AssertionError(f"Compression task {task_id} did not finish in time")
+
     def test_compress_zip_directory(self, client):
         import zipfile
 
@@ -421,7 +435,11 @@ class TestCompressEndpoint:
                 assert response.status_code == 200, response.get_json()
                 data = response.get_json()
                 assert data["name"].endswith(".zip")
-                with zipfile.ZipFile(data["archive"]) as zf:
+                assert "task_id" in data
+                final = self._wait_for_compress(client, data["task_id"])
+                assert final["status"] == "completed", final
+                assert final["archive"]
+                with zipfile.ZipFile(final["archive"]) as zf:
                     names = sorted(zf.namelist())
                 # Use forward slashes for cross-platform comparison
                 names_norm = sorted(n.replace("\\", "/") for n in names)
@@ -449,7 +467,9 @@ class TestCompressEndpoint:
                 assert response.status_code == 200
                 data = response.get_json()
                 assert data["name"].endswith(".tar.gz")
-                with tarfile.open(data["archive"], "r:gz") as tf:
+                final = self._wait_for_compress(client, data["task_id"])
+                assert final["status"] == "completed", final
+                with tarfile.open(final["archive"], "r:gz") as tf:
                     members = sorted(m.name for m in tf.getmembers())
                 assert members == ["one.txt", "two.txt"]
 
@@ -471,6 +491,61 @@ class TestCompressEndpoint:
         response = client.post("/api/compress", json={"format": "zip"})
         assert response.status_code == 400
         assert "source" in response.get_json()["error"].lower()
+
+    def test_compress_progress_reports_completion(self, client):
+        """Progress endpoint should expose status, totals, and processed bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "x.txt").write_text("hello world")
+            with tempfile.TemporaryDirectory() as dest:
+                response = client.post(
+                    "/api/compress",
+                    json={
+                        "sources": [tmp],
+                        "destination": dest,
+                        "name": "p",
+                        "format": "zip",
+                    },
+                )
+                assert response.status_code == 200
+                task_id = response.get_json()["task_id"]
+                final = self._wait_for_compress(client, task_id)
+                assert final["status"] == "completed"
+                # The progress denominator must reflect the pre-scan and
+                # the processed counter must reach the same value when
+                # the task finishes.
+                assert final["total_size"] >= len("hello world")
+                assert final["processed_size"] >= final["total_size"]
+                assert final["progress"] == 100.0
+
+    def test_compress_progress_unknown_task(self, client):
+        response = client.get("/api/compress-progress/no-such-task")
+        assert response.status_code == 404
+
+
+class TestDownloadEndpoint:
+    """Tests for /api/download with absolute paths."""
+
+    @pytest.fixture
+    def client(self):
+        from filefy import app
+
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_download_via_query_string_handles_absolute_path(self, client):
+        """Absolute paths must round-trip via the ``?path=`` query form.
+
+        The positional ``/api/download/<path>`` form is unsafe for
+        absolute paths because Werkzeug's merge-slashes redirect drops
+        the leading ``/`` and re-resolves the path against ``BASE_DIR``.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "file.txt")
+            target.write_bytes(b"download-payload")
+            response = client.get(f"/api/download?path={target}")
+            assert response.status_code == 200
+            assert response.data == b"download-payload"
 
 
 class TestChunkedUpload:

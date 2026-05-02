@@ -807,9 +807,12 @@ a:hover {
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
     min-width: 240px;
     max-width: 280px;
+    /* Keep the menu fully visible: never taller than the area below
+       the fixed header, with internal scroll if its items don't fit. */
+    max-height: calc(100vh - var(--header-height) - 24px);
+    overflow-y: auto;
     z-index: 1000;
     display: none;
-    overflow: hidden;
     backdrop-filter: blur(10px);
     animation: contextMenuFadeIn 0.15s ease-out;
 }
