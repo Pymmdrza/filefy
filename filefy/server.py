@@ -1218,9 +1218,9 @@ def _build_native_archive_invocations(fmt, archive_path, safe_sources):
         # ``zip -r out.zip name`` run with cwd=parent appends ``name``
         # (and its tree) to ``out.zip``, creating it on the first run.
         for src in safe_sources:
-            normalised = os.path.normpath(src)
-            parent = os.path.dirname(normalised) or os.sep
-            base = os.path.basename(normalised)
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
             if not base:
                 # Refuse to compress filesystem roots; the caller's
                 # ``get_safe_path`` should already prevent this.
@@ -1233,9 +1233,9 @@ def _build_native_archive_invocations(fmt, archive_path, safe_sources):
         if not tar_bin:
             return None
         for index, src in enumerate(safe_sources):
-            normalised = os.path.normpath(src)
-            parent = os.path.dirname(normalised) or os.sep
-            base = os.path.basename(normalised)
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
             if not base:
                 return None
             mode_flag = "-cvf" if index == 0 else "-rvf"
@@ -1255,9 +1255,9 @@ def _build_native_archive_invocations(fmt, archive_path, safe_sources):
         else:
             cmd += ["-czvf", archive_path]
         for src in safe_sources:
-            normalised = os.path.normpath(src)
-            parent = os.path.dirname(normalised) or os.sep
-            base = os.path.basename(normalised)
+            normalized = os.path.normpath(src)
+            parent = os.path.dirname(normalized) or os.sep
+            base = os.path.basename(normalized)
             if not base:
                 return None
             cmd += ["-C", parent, base]
@@ -1312,7 +1312,7 @@ def _run_native_archive(task_id, archive_path, fmt, safe_sources,
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
-                except Exception:  # pragma: no cover - best-effort
+                except (ProcessLookupError, OSError):  # pragma: no cover
                     logger.debug("terminate() failed", exc_info=True)
 
     def watcher():
@@ -1390,7 +1390,12 @@ def _run_native_archive(task_id, archive_path, fmt, safe_sources,
         state["stop_watcher"] = True
         watcher_thread.join(timeout=2)
 
-    # Final on-disk size is the most accurate processed_size at the end.
+    # Final on-disk size is the most accurate processed_size we have;
+    # for compressed formats (tar.gz, zip+deflate) it is smaller than
+    # the uncompressed input, so we clamp to ``total_size`` so that the
+    # transfer-center UI reaches a clean 100% and existing API consumers
+    # which rely on ``processed_size >= total_size`` at completion stay
+    # consistent with the pure-Python code path.
     try:
         final_archive_size = os.path.getsize(archive_path)
     except OSError:
