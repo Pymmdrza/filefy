@@ -7,7 +7,10 @@
 
 A **professional web-based File Manager** Written in Python. Features a Beautiful Dark Theme UI, File Upload/Download, Remote URL Downloads With Progress Tracking, and Comprehensive File Operations.
 
-![FileFy Modern File Manager](./home-screen.png 'FileFy Modern flask file Manager')
+<p align="center">
+<a title="FileFy - Home Screenshot" href="./home-screen.png"><img src="./home-screen.png" alt="Modern Cloud File Manager - FileFy" width="805"/></a>
+<a title="pip install filefy" href="https://pypi.org/project/filefy"><img src="./pip.svg" alt="Modern Cloud File Manager - FileFy" width="305"/></a>
+</p>
 
 ## Features
 
