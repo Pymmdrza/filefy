@@ -2,8 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](/)
 [![License](https://img.shields.io/badge/license-MIT-green)](/LICENSE)
-[![FileFy - Flask Modern file Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
-![GitHub License](https://img.shields.io/github/license/pymmdrza/filefy?style=plastic)
+[![FileFy - Modern Cloud File Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
 
 
 A **professional web-based file manager** written in Python with Flask. Features a beautiful dark theme UI, file upload/download, remote URL downloads with progress tracking, and comprehensive file operations.
