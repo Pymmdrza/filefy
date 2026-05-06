@@ -20,13 +20,11 @@ on:
   push:
     branches:
       - main
-      - master
-    paths:
-      - 'filefy/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'MANIFEST.in'
-      - 'Dockerfile'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+      
   workflow_dispatch:
     inputs:
       part:
