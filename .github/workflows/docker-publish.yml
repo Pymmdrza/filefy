@@ -36,6 +36,16 @@ jobs:
       packages: write
 
     steps:
+      - name: Read version from source
+        id: version
+        run: |
+          VERSION=$(python3 -c "
+          import re, pathlib
+          content = pathlib.Path('filefy/_version.py').read_text(encoding='utf-8')
+          match = re.search(r'__version__\s*=\s*[\"\']([\w.]+)[\"\']', content)
+          print(match.group(1))
+          ")
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -70,6 +80,7 @@ jobs:
             org.opencontainers.image.title=filefy
             org.opencontainers.image.description=A professional web-based file manager with dark theme UI
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
 
       - name: Build and push image
         uses: docker/build-push-action@v6
