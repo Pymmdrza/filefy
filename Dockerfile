@@ -7,6 +7,13 @@
 # ---------- Builder stage ----------
 FROM python:3.12-slim AS builder
 
+ARG APP_VERSION=dev
+
+LABEL org.opencontainers.image.title="filefy" \
+      org.opencontainers.image.description="FileFy - Modern Cloud File Manager" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/Pymmdrza/filefy"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
