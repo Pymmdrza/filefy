@@ -44,13 +44,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
+          
       - name: Read version from source
         id: read
         run: |
-          VERSION="$(python scripts/bump_version.py show)"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Source version: ${VERSION}"
+          VERSION=$(jq -r '.version' filefy/config/details.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/')
