@@ -7,6 +7,9 @@
 # ---------- Builder stage ----------
 FROM python:3.12-slim AS builder
 
+LABEL org.opencontainers.image.source=https://github.com/pymmdrza/filefy
+LABEL org.opencontainers.image.description="Modern Cloud File Manager and Remote Download, Remote Upload"
+LABEL org.opencontainers.image.licenses=MIT
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
