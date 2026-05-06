@@ -7,11 +7,10 @@
 
 A **professional web-based File Manager** Written in Python. Features a Beautiful Dark Theme UI, File Upload/Download, Remote URL Downloads With Progress Tracking, and Comprehensive File Operations.
 
-<p align="center">
-<a title="pip install filefy" href="https://pypi.org/project/filefy"><img src="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/pip.svg" alt="Modern Cloud File Manager - FileFy" width="305"/></a>
-<br/>
-<a title="FileFy - Home Screenshot" href="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png"><img src="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png" alt="Modern Cloud File Manager - FileFy" width="605"/></a>
-</p>
+
+[![pip install filefy](./pip.svg)](./pip.svg 'Modern Cloud File Manager - FileFy')
+[![Home Screen](./home-screen.png 'FileFy Home screen')](./home-screen.png 'home screen from filefy')
+
 
 ## Features
 
