@@ -23,14 +23,14 @@ A **professional web-based File Manager** Written in Python. Features a Beautifu
   HTTP Range support so the in-browser transfer manager can pause and
   resume large local downloads.
 - **Remote Download** - Download files from URLs with progress tracking
-  and **pause / resume / cancel** support.
+  and **pause / resume / cancel** support. [Screenshot](https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png 'FileFy - Download Process Screenshot')
 - **Compress** - Right-click any file or folder and create an archive
   (`.zip`, `.tar`, `.tar.gz`) directly on the server.
 - **Transfer Center** - Centered, project-themed panel that shows every
   in-flight transfer (upload, download, remote download). It can be
   minimised to the sidebar and never gets stuck on a Cancelled / Error
   state — every row has Pause, Resume, Cancel and Dismiss controls.
-- **Cloudflare Tunnel** - Optional `--tunnel` flag that publishes the
+- [**Cloudflare Tunnel**](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/ 'Cloudflare Tunnel') - Optional `--tunnel` flag that publishes the
   server through a free `*.trycloudflare.com` URL alongside the local
   one. Requires the `cloudflared` binary to be installed on PATH.
 - **File Operations** - Copy, move, rename, delete files and folders
