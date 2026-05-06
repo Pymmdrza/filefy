@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "filefy"
 dynamic = ["version"]
 description = "A professional web-based file manager with dark theme UI"
-readme = "README.md"
+readme = ".github/README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.9"
