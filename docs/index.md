@@ -1,18 +1,38 @@
-# filefy
+# FileFy
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](/)
 [![License](https://img.shields.io/badge/license-MIT-green)](/LICENSE)
-[![FileFy - Flask Modern file Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
+[![FileFy - Modern Cloud File Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
 
 
-A **professional web-based file manager** written in Python with Flask. Features a beautiful dark theme UI, file upload/download, remote URL downloads with progress tracking, and comprehensive file operations.
+A **professional web-based File Manager** Written in Python. Features a Beautiful Dark Theme UI, File Upload/Download, Remote URL Downloads With Progress Tracking, and Comprehensive File Operations.
+
+<p align="center">
+<a title="pip install filefy" href="https://pypi.org/project/filefy"><img src="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/pip.svg" alt="Modern Cloud File Manager - FileFy" width="305"/></a>
+<br/>
+<a title="FileFy - Home Screenshot" href="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png"><img src="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png" alt="Modern Cloud File Manager - FileFy" width="605"/></a>
+</p>
 
 ## Features
 
 - **Professional Dark Theme UI** - Modern, responsive design
-- **File Upload** - Drag & drop or click to upload files
-- **File Download** - Download files directly from the browser
+- **File Upload** - Drag & drop or click to upload files. Uploads are
+  chunked, with per-file progress, **pause / resume / cancel** controls,
+  and they survive transient connection drops.
+- **File Download** - Download files directly from the browser, with
+  HTTP Range support so the in-browser transfer manager can pause and
+  resume large local downloads.
 - **Remote Download** - Download files from URLs with progress tracking
+  and **pause / resume / cancel** support.
+- **Compress** - Right-click any file or folder and create an archive
+  (`.zip`, `.tar`, `.tar.gz`) directly on the server.
+- **Transfer Center** - Centered, project-themed panel that shows every
+  in-flight transfer (upload, download, remote download). It can be
+  minimised to the sidebar and never gets stuck on a Cancelled / Error
+  state — every row has Pause, Resume, Cancel and Dismiss controls.
+- **Cloudflare Tunnel** - Optional `--tunnel` flag that publishes the
+  server through a free `*.trycloudflare.com` URL alongside the local
+  one. Requires the `cloudflared` binary to be installed on PATH.
 - **File Operations** - Copy, move, rename, delete files and folders
 - **Search** - Quick file search functionality
 - **Context Menu** - Right-click menu with common actions
@@ -45,6 +65,10 @@ filefy --host 127.0.0.1 --port 3000
 
 # Enable debug mode
 filefy --debug
+
+# Also expose the server on a public Cloudflare tunnel
+# (install cloudflared first: https://github.com/cloudflare/cloudflared)
+filefy --tunnel
 ```
 
 Then open your browser and go to: **http://localhost:5000**
@@ -71,10 +95,57 @@ pip install -e .
 pipx install filefy
 ```
 
+### Method 4: Docker (GitHub Container Registry)
+
+Pre-built multi-arch (`linux/amd64`, `linux/arm64`) images are published on every
+push to the default branch and on every `v*` tag at
+[`ghcr.io/pymmdrza/filefy`](https://github.com/Pymmdrza/filefy/pkgs/container/filefy).
+
+```bash
+# Pull and run the latest image, mounting the host directory you want to manage
+docker run -d \
+  --name filefy \
+  -p 5000:5000 \
+  -v "$PWD/data:/data" \
+  ghcr.io/pymmdrza/filefy:latest
+```
+
+Open <http://localhost:5000> to use the file manager. The container exposes the
+following environment variables (all optional):
+
+| Variable      | Default     | Description                              |
+|---------------|-------------|------------------------------------------|
+| `FILEFY_HOST` | `0.0.0.0`   | Interface to bind the server to          |
+| `FILEFY_PORT` | `5000`      | Port to listen on (inside the container) |
+| `FILEFY_DIR`  | `/data`     | Base directory exposed by the manager    |
+
+Pin a specific version by tag, e.g. `ghcr.io/pymmdrza/filefy:v1.0.0`.
+
+#### Docker Compose
+
+A ready-to-use `docker-compose.yml` is included:
+
+```bash
+docker compose up -d
+```
+
+This will mount `./data` into the container and expose the UI on
+<http://localhost:5000>. Replace the `image:` line with `build: .` to build the
+image locally from the source tree instead of pulling from GHCR.
+
+#### Build the image yourself
+
+```bash
+git clone https://github.com/Pymmdrza/filefy.git
+cd filefy
+docker build -t filefy:local .
+docker run --rm -p 5000:5000 -v "$PWD/data:/data" filefy:local
+```
+
 ## CLI Usage
 
 ```
-usage: filefy [-h] [-H HOST] [-p PORT] [-d DIR] [--debug] [-v]
+usage: filefy [-h] [-H HOST] [-p PORT] [-d DIR] [--debug] [--tunnel] [-v]
 
 filefy - Professional Web-Based File Manager
 
@@ -84,6 +155,9 @@ options:
   -p, --port PORT       Port to run the server on (default: 5000)
   -d, --dir DIR         Base directory for file management (default: home)
   --debug               Enable Flask debug mode
+  --tunnel              Also publish the server through a Cloudflare quick
+                        tunnel and print the public URL alongside the local
+                        URL. Requires the 'cloudflared' binary on PATH.
   -v, --version         show program's version number and exit
 
 Examples:
@@ -92,6 +166,7 @@ Examples:
   filefy --host 127.0.0.1        Only allow local connections
   filefy -d /home/user/files     Set base directory
   filefy --debug                 Enable Flask debug mode
+  filefy --tunnel                Also expose a public Cloudflare URL
 ```
 
 ## Python API
@@ -127,39 +202,6 @@ pip install waitress
 waitress-serve --listen=0.0.0.0:8000 filefy:app
 ```
 
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+C` | Copy selected item |
-| `Ctrl+X` | Cut selected item |
-| `Ctrl+V` | Paste item |
-| `F2` | Rename selected item |
-| `Delete` | Delete selected item |
-| `F5` | Refresh current directory |
-| `Escape` | Close modals / Deselect |
-
-## API Endpoints
-
-The following REST API endpoints are available:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/browse` | List directory contents |
-| `POST` | `/api/upload` | Upload files |
-| `GET` | `/api/download` | Download a file |
-| `POST` | `/api/remote-download` | Start remote URL download |
-| `GET` | `/api/download-tasks` | Get download progress |
-| `POST` | `/api/copy` | Copy file/folder |
-| `POST` | `/api/move` | Move file/folder |
-| `POST` | `/api/delete` | Delete file/folder |
-| `POST` | `/api/rename` | Rename file/folder |
-| `POST` | `/api/create-folder` | Create new folder |
-| `GET` | `/api/search` | Search files |
-| `GET` | `/api/preview` | Preview file content |
-| `GET` | `/api/file-info` | Get file information |
-| `GET` | `/api/disk-usage` | Get disk usage stats |
-
 ## Development
 
 ### Setup Development Environment
@@ -171,6 +213,10 @@ python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
+
+>[!NOTE]
+> More details about [API](https://github.com/Pymmdrza/filefy/blob/main/.github/API.md)
+
 
 ## License
 
