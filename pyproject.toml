@@ -60,7 +60,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/Pymmdrza/filefy"
-Documentation = "https://github.com/Pymmdrza/filefy#readme"
+Documentation = "https://filefy.readthedocs.io/en/latest/"
 Repository = "https://github.com/Pymmdrza/filefy.git"
 Issues = "https://github.com/Pymmdrza/filefy/issues"
 Changelog = "https://github.com/Pymmdrza/filefy/releases"
