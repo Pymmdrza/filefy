@@ -14,4 +14,4 @@ The PyPI release workflow validates that the git tag (``vX.Y.Z``) matches
 the value defined here before publishing.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
