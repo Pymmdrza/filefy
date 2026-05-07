@@ -3,7 +3,7 @@
     {
       "type": "app",
       "data": {
-        "serviceName": "FileFy",
+        "serviceName": "filefy",
         "env": "APP_NAME=FileFy\nAPP_ENV=production\nAPP_DEBUG=false\nSITE_OWNER=pymmdrza@gmail.com\nFILEFY_HOST=0.0.0.0\nFILEFY_PORT=5000\nFILEFY_DIR=/data\nAPP_URL=https://$(PRIMARY_DOMAIN)\nPYTHONDONTWRITEBYTECODE=1\nPYTHONUNBUFFERED=1\nPIP_NO_CACHE_DIR=1\nPIP_DISABLE_PIP_VERSION_CHECK=1",
         "source": {
           "type": "image",
