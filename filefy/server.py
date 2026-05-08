@@ -2114,7 +2114,7 @@ def bridge_connect():
             timeout=(5, 30),
         )
     except requests.RequestException as exc:
-        return jsonify({"error": f"Could not reach remote server: {exc}"}), 502
+        return jsonify({"error": "Could not reach remote server. Check the URL and try again."}), 502
 
     if not resp.ok:
         try:
@@ -2319,7 +2319,7 @@ def bridge_peer_browse():
             timeout=(5, 30),
         )
     except requests.RequestException as exc:
-        return jsonify({"error": f"Failed to reach peer: {exc}"}), 502
+        return jsonify({"error": "Failed to reach peer. Check the connection and try again."}), 502
 
     try:
         body = resp.json()
@@ -2537,9 +2537,9 @@ def bridge_push():
             continue
         safe = get_safe_path(f)
         if not os.path.exists(safe):
-            return jsonify({"error": f"File not found: {f}"}), 404
+            return jsonify({"error": "One or more source files were not found"}), 404
         if not os.path.isfile(safe):
-            return jsonify({"error": f"Directories cannot be pushed directly: {f}. Compress first."}), 400
+            return jsonify({"error": "Only files can be pushed. Compress directories first."}), 400
         safe_files.append(safe)
 
     if not safe_files:

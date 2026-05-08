@@ -2151,7 +2151,7 @@ function initBridge() {
     const doReceiveBtn = document.getElementById('bridgeDoReceiveBtn');
     if (doReceiveBtn) doReceiveBtn.addEventListener('click', doBridgeReceive);
 
-    // Refresh peer list and poll transfers every 2 s.
+    // Refresh peer list every 10 s and poll bridge transfers every 2 s.
     refreshBridgePeers();
     setInterval(refreshBridgePeers, 10000);
     setInterval(refreshBridgeTransfers, 2000);
