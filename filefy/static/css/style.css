@@ -1909,3 +1909,85 @@ a:hover {
     padding: 6px;
     word-break: break-all;
 }
+
+/* ── Peer connection tab bar ─────────────────────────────────────────────── */
+
+.tab-bar {
+    display: flex;
+    align-items: stretch;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    min-height: 36px;
+    flex-shrink: 0;
+    overflow-x: auto;
+    gap: 2px;
+    padding: 0 6px;
+}
+
+.tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color .18s, border-color .18s, background .18s;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.tab.active {
+    color: var(--accent-primary);
+    border-bottom-color: var(--accent-primary);
+}
+
+.tab .tab-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    font-size: 10px;
+    opacity: .55;
+    margin-left: 2px;
+    transition: opacity .18s, background .18s;
+}
+
+.tab .tab-close:hover {
+    opacity: 1;
+    background: rgba(255, 59, 95, .25);
+    color: var(--accent-danger);
+}
+
+/* ── Status bar peer badge ────────────────────────────────────────────────── */
+
+.peer-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 255, 198, .10);
+    border: 1px solid rgba(0, 255, 198, .25);
+    color: var(--accent-primary);
+}
+
+.peer-badge i {
+    font-size: 11px;
+}
+
+/* ── Remote toolbar actions visibility helper ────────────────────────────── */
+
+.hidden {
+    display: none !important;
+}

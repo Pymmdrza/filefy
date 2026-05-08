@@ -117,12 +117,22 @@
 
         <!-- Main Content -->
         <main class="content">
+            <!-- Tab Bar -->
+            <div class="tab-bar" id="tabBar">
+                <div class="tab active" id="tab-local" data-tab="local">
+                    <i class="fas fa-desktop"></i>
+                    <span>Local</span>
+                </div>
+                <!-- Remote peer tabs are inserted here dynamically -->
+            </div>
+
             <!-- Toolbar -->
             <div class="toolbar">
                 <div class="breadcrumb" id="breadcrumb">
                     <!-- Breadcrumb will be inserted here -->
                 </div>
-                <div class="toolbar-actions">
+                <!-- Local toolbar actions (shown when local tab active) -->
+                <div class="toolbar-actions" id="localToolbarActions">
                     <button class="btn btn-primary" id="uploadBtn">
                         <i class="fas fa-upload"></i> Upload
                     </button>
@@ -134,6 +144,23 @@
                             <i class="fas fa-th-large"></i>
                         </button>
                         <button class="btn btn-icon" id="listViewBtn" title="List View">
+                            <i class="fas fa-list"></i>
+                        </button>
+                    </div>
+                </div>
+                <!-- Remote toolbar actions (shown when a peer tab is active) -->
+                <div class="toolbar-actions hidden" id="remoteToolbarActions">
+                    <button class="btn btn-primary" id="remoteUploadBtn" title="Upload a local file to the remote server">
+                        <i class="fas fa-upload"></i> Upload to Remote
+                    </button>
+                    <button class="btn btn-secondary" id="remoteNewFolderBtn" title="Create a folder on the remote server">
+                        <i class="fas fa-folder-plus"></i> New Folder
+                    </button>
+                    <div class="view-toggle">
+                        <button class="btn btn-icon active" id="remoteGridViewBtn" title="Grid View">
+                            <i class="fas fa-th-large"></i>
+                        </button>
+                        <button class="btn btn-icon" id="remoteListViewBtn" title="List View">
                             <i class="fas fa-list"></i>
                         </button>
                     </div>
@@ -150,6 +177,10 @@
             <!-- Status Bar -->
             <div class="status-bar">
                 <span id="statusText">Ready</span>
+                <span id="peerBadge" class="peer-badge" style="display:none;">
+                    <i class="fas fa-satellite-dish"></i>
+                    <span id="peerBadgeText"></span>
+                </span>
                 <span id="itemCount">0 items</span>
             </div>
         </main>
@@ -462,6 +493,46 @@
                 <button class="btn btn-primary" id="confirmCompressBtn">
                     <i class="fas fa-file-archive"></i> Create Archive
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote Rename Modal -->
+    <div class="modal" id="remoteRenameModal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-edit"></i> Rename on Remote</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="remoteNewName">New Name</label>
+                    <input type="text" id="remoteNewName" placeholder="Enter new name">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="confirmRemoteRenameBtn">Rename</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Remote New Folder Modal -->
+    <div class="modal" id="remoteNewFolderModal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-folder-plus"></i> New Folder on Remote</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="remoteFolderName">Folder Name</label>
+                    <input type="text" id="remoteFolderName" placeholder="Enter folder name">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="confirmRemoteNewFolderBtn">Create</button>
             </div>
         </div>
     </div>

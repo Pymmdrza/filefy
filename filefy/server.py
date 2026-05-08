@@ -2802,6 +2802,64 @@ def bridge_dismiss_transfer(task_id):
     return jsonify({"message": "Dismissed"})
 
 
+_BRIDGE_ALLOWED_OPS = {
+    "delete": "/api/delete",
+    "rename": "/api/rename",
+    "create-folder": "/api/create-folder",
+    "copy": "/api/copy",
+    "move": "/api/move",
+}
+
+
+@app.route("/api/bridge/remote-op", methods=["POST"])
+def bridge_remote_op():
+    """Proxy a file-system operation to a connected peer.
+
+    Body (JSON)::
+
+        {
+          "peer_id": "<uuid>",
+          "op":      "delete" | "rename" | "create-folder" | "copy" | "move",
+          "payload": { ... }   // forwarded verbatim to the peer endpoint
+        }
+
+    The payload is forwarded as-is to the peer's regular API endpoint so
+    the existing per-operation logic on the peer is reused without any
+    duplication.
+    """
+    data = request.get_json(silent=True) or {}
+    peer_id = data.get("peer_id", "")
+    op = data.get("op", "")
+    payload = data.get("payload")
+
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be a JSON object"}), 400
+
+    if op not in _BRIDGE_ALLOWED_OPS:
+        return jsonify({"error": f"Unknown operation: {op}"}), 400
+
+    peer = _bridge_get_peer(peer_id)
+    if not peer:
+        return jsonify({"error": "Peer not found"}), 404
+
+    endpoint = _BRIDGE_ALLOWED_OPS[op]
+    try:
+        resp = requests.post(
+            f"{peer['url']}{endpoint}",
+            json=payload,
+            timeout=(5, 30),
+        )
+    except requests.RequestException:
+        return jsonify({"error": "Failed to reach peer"}), 502
+
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"error": f"HTTP {resp.status_code}"}
+
+    return jsonify(body), resp.status_code
+
+
 @app.route("/api/create-folder", methods=["POST"])
 def create_folder():
     """Create a new folder"""
