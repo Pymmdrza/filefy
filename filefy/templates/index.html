@@ -78,6 +78,22 @@
                 </button>
             </div>
 
+            <!-- Server Bridge Section -->
+            <div class="sidebar-section" id="bridgeSection">
+                <h3>Server Bridge</h3>
+                <div class="bridge-actions">
+                    <button class="btn btn-primary btn-full" id="bridgeGenerateBtn" title="Generate a pairing code for this server">
+                        <i class="fas fa-key"></i> Generate Code
+                    </button>
+                    <button class="btn btn-secondary btn-full" id="bridgeConnectBtn" title="Connect to a remote server using its pairing code" style="margin-top:4px;">
+                        <i class="fas fa-plug"></i> Connect to Peer
+                    </button>
+                </div>
+                <div class="bridge-peers" id="bridgePeerList">
+                    <p class="sidebar-empty">No peers connected</p>
+                </div>
+            </div>
+
             <div class="sidebar-section">
                 <div class="sidebar-section-head">
                     <h3>Active Transfers</h3>
@@ -236,6 +252,7 @@
         <div class="context-menu-section">
             <ul>
                 <li data-action="info"><i class="fas fa-info-circle"></i> Properties</li>
+                <li data-action="bridge-send"><i class="fas fa-server"></i> Send to Server...</li>
                 <li data-action="delete" class="danger"><i class="fas fa-trash-alt"></i> Delete <span class="shortcut">Del</span></li>
             </ul>
         </div>
@@ -444,6 +461,139 @@
                 <button class="btn btn-secondary close-modal">Cancel</button>
                 <button class="btn btn-primary" id="confirmCompressBtn">
                     <i class="fas fa-file-archive"></i> Create Archive
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bridge: Generate Pairing Code Modal -->
+    <div class="modal" id="bridgeGenerateModal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-key"></i> Generate Pairing Code</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="bridgeMyUrl">This Server's Public URL</label>
+                    <input type="text" id="bridgeMyUrl" placeholder="https://my-server.example.com">
+                    <small class="form-help">Enter the URL other servers will use to reach this instance (e.g. your domain or IP:port).</small>
+                </div>
+                <div id="bridgeCodeResult" style="display:none;">
+                    <label>Pairing Code – paste this on the other server</label>
+                    <div class="bridge-code-box">
+                        <textarea id="bridgeCodeText" rows="3" readonly></textarea>
+                        <button class="btn btn-secondary" id="bridgeCopyCodeBtn" style="margin-top:6px;">
+                            <i class="fas fa-copy"></i> Copy Code
+                        </button>
+                    </div>
+                    <small class="form-help" style="color:var(--warning);">This code expires in 1 hour and can only be used once.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Close</button>
+                <button class="btn btn-primary" id="bridgeDoGenerateBtn">
+                    <i class="fas fa-key"></i> Generate
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bridge: Connect to Peer Modal -->
+    <div class="modal" id="bridgeConnectModal">
+        <div class="modal-content modal-sm">
+            <div class="modal-header">
+                <h2><i class="fas fa-plug"></i> Connect to Peer Server</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="bridgePasteCode">Pairing Code</label>
+                    <textarea id="bridgePasteCode" rows="3" placeholder="Paste the pairing code from the other server here…"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="bridgeMyName">My Server Name (optional)</label>
+                    <input type="text" id="bridgeMyName" placeholder="Server A">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="bridgeDoConnectBtn">
+                    <i class="fas fa-plug"></i> Connect
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bridge: Send Files to Peer Modal -->
+    <div class="modal" id="bridgeSendModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-server"></i> Send to Server</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>File(s) to send</label>
+                    <div id="bridgeSendFilesList" class="compress-sources"></div>
+                </div>
+                <div class="form-group">
+                    <label for="bridgeSendPeer">Target Server</label>
+                    <select id="bridgeSendPeer"></select>
+                </div>
+                <div class="form-group">
+                    <label for="bridgeSendDest">Remote Destination Path</label>
+                    <input type="text" id="bridgeSendDest" placeholder="/home/user/uploads">
+                    <small class="form-help">Enter the absolute path on the remote server where the file(s) should be saved.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="bridgeDoSendBtn">
+                    <i class="fas fa-paper-plane"></i> Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bridge: Receive (Pull) from Peer Modal -->
+    <div class="modal" id="bridgeReceiveModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-server"></i> Receive from Server</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="bridgeReceivePeer">Source Server</label>
+                    <select id="bridgeReceivePeer"></select>
+                </div>
+                <div class="form-group">
+                    <label>Browse remote files</label>
+                    <div class="folder-browser" id="bridgeRemoteBrowser" style="max-height:220px;">
+                        <div class="folder-path" id="bridgeRemotePath"></div>
+                        <div class="folder-list" id="bridgeRemoteList">
+                            <p style="padding:8px;opacity:.6;">Select a server above and click Browse</p>
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary" id="bridgeBrowseBtn" style="margin-top:6px;">
+                        <i class="fas fa-folder-open"></i> Browse
+                    </button>
+                </div>
+                <div class="form-group">
+                    <label>Selected remote files</label>
+                    <div id="bridgeReceiveFilesList" class="compress-sources" style="min-height:32px;"></div>
+                </div>
+                <div class="form-group">
+                    <label for="bridgeReceiveDest">Save to (local path)</label>
+                    <input type="text" id="bridgeReceiveDest" placeholder="/home/user/downloads">
+                    <small class="form-help">Absolute path on this server. Defaults to the current directory.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="bridgeDoReceiveBtn">
+                    <i class="fas fa-download"></i> Receive
                 </button>
             </div>
         </div>
