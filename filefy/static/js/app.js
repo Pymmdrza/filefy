@@ -695,6 +695,9 @@ function handleContextAction(action) {
             if (!state.selectedItem) return;
             showCompressDialog();
             break;
+        case 'bridge-send':
+            handleBridgeSend();
+            break;
     }
 }
 
@@ -2105,3 +2108,531 @@ function formatSize(bytes) {
     }
     return `${bytes.toFixed(2)} ${units[i]}`;
 }
+
+// =============================================================
+// Server Bridge
+// =============================================================
+
+// Bridge state: peers we are connected to, and their transfer tasks.
+const bridgeState = {
+    peers: [],          // [{id, name, url, connected_at}]
+    transfers: {},      // task_id -> transfer object (for transfer center)
+    remotePath: '',     // currently browsed remote path in receive modal
+    remotePeerId: '',   // peer being browsed in receive modal
+    selectedRemoteFiles: [], // [{path, name}] selected in receive modal
+};
+
+// ── Initialisation ────────────────────────────────────────────────────────
+
+function initBridge() {
+    // Wire up sidebar buttons.
+    const genBtn = document.getElementById('bridgeGenerateBtn');
+    if (genBtn) genBtn.addEventListener('click', openBridgeGenerateModal);
+
+    const connBtn = document.getElementById('bridgeConnectBtn');
+    if (connBtn) connBtn.addEventListener('click', openBridgeConnectModal);
+
+    // Wire up modal buttons.
+    const doGenBtn = document.getElementById('bridgeDoGenerateBtn');
+    if (doGenBtn) doGenBtn.addEventListener('click', doBridgeGenerate);
+
+    const copyBtn = document.getElementById('bridgeCopyCodeBtn');
+    if (copyBtn) copyBtn.addEventListener('click', copyBridgeCode);
+
+    const doConnBtn = document.getElementById('bridgeDoConnectBtn');
+    if (doConnBtn) doConnBtn.addEventListener('click', doBridgeConnect);
+
+    const doSendBtn = document.getElementById('bridgeDoSendBtn');
+    if (doSendBtn) doSendBtn.addEventListener('click', doBridgeSend);
+
+    const browseBtn = document.getElementById('bridgeBrowseBtn');
+    if (browseBtn) browseBtn.addEventListener('click', doBridgeBrowse);
+
+    const doReceiveBtn = document.getElementById('bridgeDoReceiveBtn');
+    if (doReceiveBtn) doReceiveBtn.addEventListener('click', doBridgeReceive);
+
+    // Refresh peer list every 10 s and poll bridge transfers every 2 s.
+    refreshBridgePeers();
+    setInterval(refreshBridgePeers, 10000);
+    setInterval(refreshBridgeTransfers, 2000);
+}
+
+// ── Peer list ─────────────────────────────────────────────────────────────
+
+async function refreshBridgePeers() {
+    try {
+        const resp = await fetch('/api/bridge/peers');
+        if (!resp.ok) return;
+        bridgeState.peers = await resp.json();
+        renderBridgePeerList();
+    } catch (e) { /* ignore */ }
+}
+
+function renderBridgePeerList() {
+    const container = document.getElementById('bridgePeerList');
+    if (!container) return;
+
+    if (!bridgeState.peers.length) {
+        container.innerHTML = '<p class="sidebar-empty">No peers connected</p>';
+        return;
+    }
+
+    container.innerHTML = bridgeState.peers.map(p => `
+        <div class="bridge-peer-item" data-peer-id="${escapeHtml(p.id)}">
+            <span class="bridge-peer-icon"><i class="fas fa-server"></i></span>
+            <span class="bridge-peer-name" title="${escapeHtml(p.url)}">${escapeHtml(p.name)}</span>
+            <button class="btn btn-icon btn-tiny bridge-receive-btn" title="Receive files from this server" data-peer-id="${escapeHtml(p.id)}">
+                <i class="fas fa-download"></i>
+            </button>
+            <button class="btn btn-icon btn-tiny bridge-disconnect-btn" title="Disconnect" data-peer-id="${escapeHtml(p.id)}">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `).join('');
+
+    container.querySelectorAll('.bridge-disconnect-btn').forEach(btn => {
+        btn.addEventListener('click', () => disconnectBridgePeer(btn.dataset.peerId));
+    });
+    container.querySelectorAll('.bridge-receive-btn').forEach(btn => {
+        btn.addEventListener('click', () => openBridgeReceiveModal(btn.dataset.peerId));
+    });
+}
+
+async function disconnectBridgePeer(peerId) {
+    try {
+        const resp = await fetch(`/api/bridge/disconnect/${encodeURIComponent(peerId)}`, { method: 'DELETE' });
+        if (resp.ok) {
+            showToast('Peer disconnected', 'info');
+            refreshBridgePeers();
+        } else {
+            const d = await resp.json();
+            showToast(d.error || 'Disconnect failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+}
+
+// ── Generate pairing code ─────────────────────────────────────────────────
+
+function openBridgeGenerateModal() {
+    document.getElementById('bridgeCodeResult').style.display = 'none';
+    document.getElementById('bridgeCodeText').value = '';
+    // Pre-fill with the server's tunnel URL if available
+    const tunnelUrl = elements.tunnelUrl ? elements.tunnelUrl.textContent : '';
+    document.getElementById('bridgeMyUrl').value =
+        tunnelUrl || (window.location.protocol + '//' + window.location.host);
+    openModal('bridgeGenerateModal');
+}
+
+async function doBridgeGenerate() {
+    const url = document.getElementById('bridgeMyUrl').value.trim();
+    if (!url) {
+        showToast('Please enter your server URL', 'warning');
+        return;
+    }
+    try {
+        const resp = await fetch(
+            '/api/bridge/generate-code?' + new URLSearchParams({ url })
+        );
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Failed to generate code', 'error');
+            return;
+        }
+        document.getElementById('bridgeCodeText').value = data.code;
+        document.getElementById('bridgeCodeResult').style.display = '';
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
+    }
+}
+
+function copyBridgeCode() {
+    const txt = document.getElementById('bridgeCodeText').value;
+    if (!txt) return;
+    navigator.clipboard.writeText(txt).then(() => {
+        showToast('Pairing code copied to clipboard', 'success');
+    }).catch(() => {
+        // Fallback for environments without clipboard API (may not work in all browsers)
+        try {
+            document.getElementById('bridgeCodeText').select();
+            const ok = document.execCommand('copy');
+            showToast(ok ? 'Pairing code copied' : 'Copy manually from the text box', ok ? 'success' : 'info');
+        } catch (e) {
+            showToast('Please copy the code manually from the text box', 'info');
+        }
+    });
+}
+
+// ── Connect to peer ───────────────────────────────────────────────────────
+
+function openBridgeConnectModal() {
+    document.getElementById('bridgePasteCode').value = '';
+    document.getElementById('bridgeMyName').value = '';
+    openModal('bridgeConnectModal');
+}
+
+async function doBridgeConnect() {
+    const code = document.getElementById('bridgePasteCode').value.trim();
+    const name = document.getElementById('bridgeMyName').value.trim() || 'Server';
+    if (!code) {
+        showToast('Please paste the pairing code', 'warning');
+        return;
+    }
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code, name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Connection failed', 'error');
+            return;
+        }
+        showToast('Connected to "' + (data.peer_name || 'peer') + '"', 'success');
+        closeModal('bridgeConnectModal');
+        refreshBridgePeers();
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
+    }
+    hideLoading();
+}
+
+// ── Send files to peer (push) ─────────────────────────────────────────────
+
+function openBridgeSendModal(filePaths) {
+    if (!bridgeState.peers.length) {
+        showToast('No peers connected. Connect a peer first.', 'warning');
+        return;
+    }
+
+    // Render file list
+    const listEl = document.getElementById('bridgeSendFilesList');
+    listEl.innerHTML = filePaths.map(p => `
+        <div class="item"><i class="fas fa-file"></i> ${escapeHtml(p)}</div>
+    `).join('');
+
+    // Populate peer selector
+    const sel = document.getElementById('bridgeSendPeer');
+    sel.innerHTML = bridgeState.peers.map(p =>
+        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.url)})</option>`
+    ).join('');
+
+    // Default destination
+    document.getElementById('bridgeSendDest').value = '';
+
+    // Store files for submit handler
+    sel.dataset.files = JSON.stringify(filePaths);
+
+    openModal('bridgeSendModal');
+}
+
+async function doBridgeSend() {
+    const peerId = document.getElementById('bridgeSendPeer').value;
+    const dest   = document.getElementById('bridgeSendDest').value.trim();
+    const files  = JSON.parse(document.getElementById('bridgeSendPeer').dataset.files || '[]');
+
+    if (!peerId) { showToast('Select a peer server', 'warning'); return; }
+    if (!dest)   { showToast('Enter the remote destination path', 'warning'); return; }
+    if (!files.length) { showToast('No files selected', 'warning'); return; }
+
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/push', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peer_id: peerId, files, destination: dest }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Push failed', 'error');
+            return;
+        }
+        closeModal('bridgeSendModal');
+        showToast(data.message || 'Transfer started', 'success');
+        showTransferCenter();
+        // Register a local transfer entry so it appears in the Transfer Center.
+        const taskId = data.task_id;
+        const peer = bridgeState.peers.find(p => p.id === peerId) || {};
+        bridgeState.transfers['bt-' + taskId] = makeBridgeTransfer('bt-' + taskId, {
+            id: taskId,
+            kind: 'bridge-push',
+            peer_name: peer.name || 'Peer',
+            current_file: '',
+            status: 'pending',
+            progress: 0,
+            transferred: 0,
+            total_size: 0,
+            speed: 0,
+        });
+        renderTransfers();
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
+    }
+    hideLoading();
+}
+
+// ── Receive files from peer (pull) ────────────────────────────────────────
+
+function openBridgeReceiveModal(preselectedPeerId) {
+    if (!bridgeState.peers.length) {
+        showToast('No peers connected. Connect a peer first.', 'warning');
+        return;
+    }
+
+    const sel = document.getElementById('bridgeReceivePeer');
+    sel.innerHTML = bridgeState.peers.map(p =>
+        `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.url)})</option>`
+    ).join('');
+
+    if (preselectedPeerId) sel.value = preselectedPeerId;
+
+    bridgeState.selectedRemoteFiles = [];
+    bridgeState.remotePath = '';
+    bridgeState.remotePeerId = sel.value;
+    document.getElementById('bridgeRemotePath').textContent = '';
+    document.getElementById('bridgeRemoteList').innerHTML =
+        '<p style="padding:8px;opacity:.6;">Click Browse to explore the remote server</p>';
+    document.getElementById('bridgeReceiveFilesList').innerHTML = '';
+    document.getElementById('bridgeReceiveDest').value = state.currentPath || serverHome || '';
+
+    openModal('bridgeReceiveModal');
+}
+
+async function doBridgeBrowse() {
+    const peerId = document.getElementById('bridgeReceivePeer').value;
+    if (!peerId) { showToast('Select a peer server', 'warning'); return; }
+
+    bridgeState.remotePeerId = peerId;
+    await bridgeBrowsePath(peerId, bridgeState.remotePath || '');
+}
+
+async function bridgeBrowsePath(peerId, path) {
+    try {
+        const params = new URLSearchParams({ peer_id: peerId });
+        if (path) params.set('path', path);
+        const resp = await fetch('/api/bridge/peer-browse?' + params);
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Browse failed', 'error');
+            return;
+        }
+        bridgeState.remotePath = data.current_path || path;
+        renderBridgeRemoteList(data);
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
+    }
+}
+
+function renderBridgeRemoteList(data) {
+    const pathEl = document.getElementById('bridgeRemotePath');
+    const listEl = document.getElementById('bridgeRemoteList');
+    if (!pathEl || !listEl) return;
+
+    pathEl.textContent = data.current_path || '';
+
+    let html = '';
+    if (data.parent_path && data.parent_path !== data.current_path) {
+        html += `<div class="folder-item bridge-remote-nav" data-path="${escapeHtml(data.parent_path)}" data-is-dir="true">
+            <i class="fas fa-arrow-left"></i> ..
+        </div>`;
+    }
+
+    (data.items || []).forEach(item => {
+        const icon = item.is_dir ? 'fa-folder' : 'fa-file';
+        html += `<div class="folder-item" data-path="${escapeHtml(item.path)}" data-is-dir="${item.is_dir}" data-name="${escapeHtml(item.name)}">
+            <i class="fas ${icon}"></i>
+            <span>${escapeHtml(item.name)}</span>
+            ${item.is_dir ? '' : `<button class="btn btn-icon btn-tiny bridge-select-file-btn" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}" title="Select this file"><i class="fas fa-plus"></i></button>`}
+        </div>`;
+    });
+
+    if (!html) html = '<p style="padding:8px;opacity:.6;">Empty folder</p>';
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('.bridge-remote-nav').forEach(el => {
+        el.addEventListener('click', () => {
+            bridgeBrowsePath(bridgeState.remotePeerId, el.dataset.path);
+        });
+    });
+    listEl.querySelectorAll('.folder-item[data-is-dir="true"]:not(.bridge-remote-nav)').forEach(el => {
+        el.addEventListener('dblclick', () => {
+            bridgeBrowsePath(bridgeState.remotePeerId, el.dataset.path);
+        });
+    });
+    listEl.querySelectorAll('.bridge-select-file-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            addBridgeSelectedFile(btn.dataset.path, btn.dataset.name);
+        });
+    });
+}
+
+function addBridgeSelectedFile(path, name) {
+    if (bridgeState.selectedRemoteFiles.some(f => f.path === path)) {
+        showToast('File already selected', 'info');
+        return;
+    }
+    bridgeState.selectedRemoteFiles.push({ path, name });
+    renderBridgeSelectedFiles();
+}
+
+function renderBridgeSelectedFiles() {
+    const el = document.getElementById('bridgeReceiveFilesList');
+    if (!el) return;
+    if (!bridgeState.selectedRemoteFiles.length) {
+        el.innerHTML = '';
+        return;
+    }
+    el.innerHTML = bridgeState.selectedRemoteFiles.map((f, i) => `
+        <div class="item" style="display:flex;align-items:center;gap:6px;">
+            <i class="fas fa-file"></i>
+            <span style="flex:1">${escapeHtml(f.name)}</span>
+            <button class="btn btn-icon btn-tiny" data-index="${i}" title="Remove">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    `).join('');
+    el.querySelectorAll('button[data-index]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            bridgeState.selectedRemoteFiles.splice(Number(btn.dataset.index), 1);
+            renderBridgeSelectedFiles();
+        });
+    });
+}
+
+async function doBridgeReceive() {
+    const peerId = document.getElementById('bridgeReceivePeer').value;
+    const dest   = document.getElementById('bridgeReceiveDest').value.trim();
+    const files  = bridgeState.selectedRemoteFiles.map(f => f.path);
+
+    if (!peerId) { showToast('Select a peer server', 'warning'); return; }
+    if (!dest)   { showToast('Enter the local destination path', 'warning'); return; }
+    if (!files.length) { showToast('Select at least one remote file', 'warning'); return; }
+
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/pull', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peer_id: peerId, files, destination: dest }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Pull failed', 'error');
+            return;
+        }
+        closeModal('bridgeReceiveModal');
+        showToast(data.message || 'Transfer started', 'success');
+        showTransferCenter();
+
+        const taskId = data.task_id;
+        const peer = bridgeState.peers.find(p => p.id === peerId) || {};
+        bridgeState.transfers['bt-' + taskId] = makeBridgeTransfer('bt-' + taskId, {
+            id: taskId,
+            kind: 'bridge-pull',
+            peer_name: peer.name || 'Peer',
+            current_file: '',
+            status: 'pending',
+            progress: 0,
+            transferred: 0,
+            total_size: 0,
+            speed: 0,
+        });
+        renderTransfers();
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
+    }
+    hideLoading();
+}
+
+// ── Transfer Center integration ───────────────────────────────────────────
+
+function makeBridgeTransfer(id, task) {
+    const taskId = task.id;
+    const transfer = {
+        id,
+        kind: task.kind,       // 'bridge-push' | 'bridge-pull'
+        filename: task.current_file || task.peer_name || 'bridge transfer',
+        status: task.status,
+        transferred: task.transferred || 0,
+        total: task.total_size || 0,
+        speed: task.speed || 0,
+        error: task.error || null,
+        startedAt: (task.created_at || Date.now() / 1000) * 1000,
+        _serverTaskId: taskId,
+        _peerName: task.peer_name || '',
+        _currentFile: task.current_file || '',
+    };
+    transfer.cancel = async () => {
+        try {
+            await fetch(`/api/bridge/cancel-transfer/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+        refreshBridgeTransfers();
+    };
+    transfer.dismiss = async () => {
+        try {
+            await fetch(`/api/bridge/dismiss-transfer/${taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+    };
+    return transfer;
+}
+
+async function refreshBridgeTransfers() {
+    let tasks;
+    try {
+        const resp = await fetch('/api/bridge/transfers');
+        if (!resp.ok) return;
+        tasks = await resp.json();
+    } catch (e) { return; }
+    if (!Array.isArray(tasks)) return;
+
+    const seenIds = new Set();
+    tasks.forEach(task => {
+        const id = 'bt-' + task.id;
+        seenIds.add(id);
+        let transfer = state.transfers[id];
+        if (!transfer) {
+            transfer = makeBridgeTransfer(id, task);
+            state.transfers[id] = transfer;
+        }
+        let status = task.status;
+        if (status === 'pending' || status === 'running') status = 'downloading';
+        transfer.status = status;
+        transfer.transferred = task.transferred || 0;
+        transfer.total = task.total_size || 0;
+        transfer.speed = task.speed || 0;
+        transfer.error = task.error || null;
+        transfer._peerName = task.peer_name || transfer._peerName;
+        transfer._currentFile = task.current_file || '';
+        transfer.filename = task.current_file || task.peer_name || transfer.filename;
+    });
+
+    // Clean up dismissed/gone tasks from the transfer center.
+    Object.keys(state.transfers).forEach(id => {
+        if (id.startsWith('bt-') && !seenIds.has(id)) {
+            delete state.transfers[id];
+        }
+    });
+
+    renderTransfers();
+}
+
+// "Send to Server" handler called from context menu action 'bridge-send'.
+function handleBridgeSend() {
+    if (!state.selectedItem) return;
+    if (!bridgeState.peers.length) {
+        showToast('No peers connected. Use "Server Bridge" in the sidebar to connect first.', 'warning');
+        return;
+    }
+    openBridgeSendModal([state.selectedItem.path]);
+}
+
+// ── Hook into app init ────────────────────────────────────────────────────
+
+// Extend the existing init() setup to include bridge initialisation.
+document.addEventListener('DOMContentLoaded', () => {
+    initBridge();
+});
