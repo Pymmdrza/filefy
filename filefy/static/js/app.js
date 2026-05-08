@@ -2253,10 +2253,14 @@ function copyBridgeCode() {
     navigator.clipboard.writeText(txt).then(() => {
         showToast('Pairing code copied to clipboard', 'success');
     }).catch(() => {
-        // Fallback for environments without clipboard API
-        document.getElementById('bridgeCodeText').select();
-        document.execCommand('copy');
-        showToast('Pairing code copied', 'success');
+        // Fallback for environments without clipboard API (may not work in all browsers)
+        try {
+            document.getElementById('bridgeCodeText').select();
+            const ok = document.execCommand('copy');
+            showToast(ok ? 'Pairing code copied' : 'Copy manually from the text box', ok ? 'success' : 'info');
+        } catch (e) {
+            showToast('Please copy the code manually from the text box', 'info');
+        }
     });
 }
 
@@ -2287,7 +2291,7 @@ async function doBridgeConnect() {
             showToast(data.error || 'Connection failed', 'error');
             return;
         }
-        showToast(`Connected to "${escapeHtml(data.peer_name)}"`, 'success');
+        showToast('Connected to "' + (data.peer_name || 'peer') + '"', 'success');
         closeModal('bridgeConnectModal');
         refreshBridgePeers();
     } catch (e) {
@@ -2595,8 +2599,7 @@ async function refreshBridgeTransfers() {
             state.transfers[id] = transfer;
         }
         let status = task.status;
-        if (status === 'pending') status = 'downloading';
-        if (status === 'running') status = 'downloading';
+        if (status === 'pending' || status === 'running') status = 'downloading';
         transfer.status = status;
         transfer.transferred = task.transferred || 0;
         transfer.total = task.total_size || 0;

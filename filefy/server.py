@@ -2097,8 +2097,9 @@ def bridge_connect():
         return jsonify({"error": "code is required"}), 400
 
     try:
-        # urlsafe_b64decode tolerates missing padding when we add "=="
-        raw = base64.urlsafe_b64decode(code + "==")
+        # Add correct padding: base64url strings must be a multiple of 4 chars.
+        padding = (4 - len(code) % 4) % 4
+        raw = base64.urlsafe_b64decode(code + "=" * padding)
         payload = json.loads(raw)
         peer_url = payload["url"].rstrip("/")
         token = payload["token"]
@@ -2651,7 +2652,7 @@ def _bridge_pull_runner(task_id):
                         speed = (transferred - speed_ref_bytes) / elapsed
                         speed_ref_bytes = transferred
                         speed_ref_time = now
-                        cur_total = _bridge_get_transfer(task_id).get("total_size") or 0
+                        cur_total = (_bridge_get_transfer(task_id) or {}).get("total_size") or 0
                         progress = (
                             min(PROGRESS_CAP_BEFORE_COMPLETE, transferred / cur_total * 100)
                             if cur_total > 0 else 0
