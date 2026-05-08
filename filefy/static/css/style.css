@@ -1857,3 +1857,55 @@ a:hover {
 .compress-sources .item i {
     color: var(--accent-primary);
 }
+
+/* ── Server Bridge ─────────────────────────────────────────────────────── */
+
+.bridge-actions {
+    margin-bottom: 8px;
+}
+
+.bridge-peer-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    margin-bottom: 4px;
+    font-size: 12px;
+}
+
+.bridge-peer-icon {
+    color: var(--accent-primary);
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.bridge-peer-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-primary);
+}
+
+.bridge-code-box {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 8px;
+}
+
+.bridge-code-box textarea {
+    width: 100%;
+    font-family: monospace;
+    font-size: 11px;
+    resize: none;
+    background: var(--bg-secondary);
+    color: var(--accent-primary);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 6px;
+    word-break: break-all;
+}
