@@ -251,6 +251,7 @@
                 <li data-action="preview"><i class="fas fa-eye"></i> Preview</li>
                 <li data-action="download"><i class="fas fa-download"></i> Download</li>
                 <li data-action="compress"><i class="fas fa-file-archive"></i> Compress as...</li>
+                <li data-action="extract" id="ctxExtract" style="display:none;"><i class="fas fa-box-open"></i> Extract Here</li>
             </ul>
         </div>
         <div class="context-menu-divider"></div>
@@ -533,6 +534,51 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary close-modal">Cancel</button>
                 <button class="btn btn-primary" id="confirmRemoteNewFolderBtn">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="fas fa-cog"></i> Application Settings</h2>
+                <button class="btn btn-icon close-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="settingsHost">Server Host</label>
+                    <input type="text" id="settingsHost" placeholder="0.0.0.0">
+                    <small style="color:var(--text-secondary)">Takes effect after restart</small>
+                </div>
+                <div class="form-group">
+                    <label for="settingsPort">Server Port</label>
+                    <input type="number" id="settingsPort" min="1" max="65535" placeholder="5000">
+                    <small style="color:var(--text-secondary)">Takes effect after restart</small>
+                </div>
+                <div class="form-group">
+                    <label for="settingsRootDir">Root Directory</label>
+                    <input type="text" id="settingsRootDir" placeholder="~">
+                </div>
+                <div class="form-group">
+                    <label for="settingsMaxUpload">Max Upload Size (bytes)</label>
+                    <input type="number" id="settingsMaxUpload" min="1048576" placeholder="10737418240">
+                </div>
+                <div class="form-group" style="display:flex;gap:24px;flex-wrap:wrap;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="settingsRead"> Read
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="settingsWrite"> Write
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="settingsDelete"> Delete
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary close-modal">Cancel</button>
+                <button class="btn btn-primary" id="saveSettingsBtn">Save Settings</button>
             </div>
         </div>
     </div>
