@@ -292,6 +292,22 @@ function setupEventListeners() {
         });
     }
 
+    // Settings button
+    const settingsBtn = document.getElementById('settingsBtn');
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', () => {
+            openSettingsModal();
+        });
+    }
+
+    // Save settings button
+    const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+    if (saveSettingsBtn) {
+        saveSettingsBtn.addEventListener('click', () => {
+            saveSettings();
+        });
+    }
+
     // New name input - enter key
     document.getElementById('newName').addEventListener('keyup', (e) => {
         if (e.key === 'Enter') renameItem();
@@ -667,6 +683,15 @@ function showContextMenu(x, y) {
         }
     }
 
+    // Show/hide the Extract item depending on whether the selected file is
+    // a supported archive type.
+    const extractBtn = document.getElementById('ctxExtract');
+    if (extractBtn) {
+        const item = state.selectedItem;
+        const isArchive = item && !item.isDir && isExtractableFile(item.path || '');
+        extractBtn.style.display = isArchive ? '' : 'none';
+    }
+
     // Show first so we can measure the actual size.
     elements.contextMenu.style.left = `${x}px`;
     elements.contextMenu.style.top = `${y}px`;
@@ -828,6 +853,10 @@ function handleContextAction(action) {
         case 'compress':
             if (!state.selectedItem) return;
             showCompressDialog();
+            break;
+        case 'extract':
+            if (!state.selectedItem) return;
+            startExtraction(state.selectedItem.path);
             break;
         case 'bridge-send':
             handleBridgeSend();
@@ -1130,7 +1159,8 @@ function transferKindIcon(kind) {
         upload: 'fa-upload',
         download: 'fa-download',
         'remote-download': 'fa-cloud-download-alt',
-        compress: 'fa-file-archive'
+        compress: 'fa-file-archive',
+        extract: 'fa-box-open'
     }[kind] || 'fa-exchange-alt';
 }
 
@@ -1935,6 +1965,187 @@ async function pollCompressionTransfer(transfer) {
         transfer.status = info.status === 'cancelling' ? 'cancelling' : 'running';
         renderTransfers();
         await new Promise(r => setTimeout(r, COMPRESS_PROGRESS_POLL_MS));
+    }
+}
+
+// =============================================================
+// Extract (decompress) endpoint integration
+// =============================================================
+
+const ARCHIVE_EXTENSIONS = new Set([
+    '.zip', '.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz', '.gz', '.bz2', '.xz'
+]);
+
+function isExtractableFile(path) {
+    const lower = (path || '').toLowerCase();
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tar.bz2') || lower.endsWith('.tar.xz')) {
+        return true;
+    }
+    const dot = lower.lastIndexOf('.');
+    return dot !== -1 && ARCHIVE_EXTENSIONS.has(lower.slice(dot));
+}
+
+async function startExtraction(archivePath) {
+    if (!archivePath) return;
+
+    let response, data;
+    try {
+        response = await fetch('/api/extract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: archivePath })
+        });
+        data = await response.json();
+    } catch (err) {
+        showToast('Network error: ' + err.message, 'error');
+        return;
+    }
+
+    if (!response.ok || !data.task_id) {
+        showToast(data && data.error ? data.error : 'Extraction failed to start', 'error');
+        return;
+    }
+
+    startExtractionTransfer(data);
+}
+
+const EXTRACT_PROGRESS_POLL_MS = 750;
+
+function startExtractionTransfer(initial) {
+    const id = 'ext-' + initial.task_id;
+    const transfer = {
+        id,
+        kind: 'extract',
+        filename: initial.archive || 'archive',
+        status: 'running',
+        transferred: 0,
+        total: initial.total_size || 0,
+        speed: 0,
+        startedAt: Date.now(),
+        _taskId: initial.task_id,
+    };
+    transfer.cancel = async () => {
+        try {
+            await fetch(`/api/cancel-extract/${transfer._taskId}`, { method: 'POST' });
+        } catch (e) { /* ignore */ }
+    };
+    addTransfer(transfer);
+    showTransferCenter();
+    pollExtractionTransfer(transfer);
+}
+
+async function pollExtractionTransfer(transfer) {
+    let lastExtracted = 0;
+    let lastTimestamp = Date.now();
+    while (true) {
+        let resp;
+        try {
+            resp = await fetch(`/api/extract-progress/${transfer._taskId}`);
+        } catch (e) {
+            transfer.status = 'error';
+            transfer.error = 'Lost connection to server';
+            renderTransfers();
+            return;
+        }
+        if (!resp.ok) {
+            transfer.status = 'error';
+            transfer.error = `Server responded with ${resp.status}`;
+            renderTransfers();
+            return;
+        }
+        const info = await resp.json();
+        transfer.total = info.total_size || transfer.total;
+        transfer.transferred = info.extracted_size || 0;
+        transfer._currentFile = info.current_file || '';
+
+        const now = Date.now();
+        const elapsed = (now - lastTimestamp) / 1000;
+        if (elapsed > 0.25) {
+            transfer.speed = (transfer.transferred - lastExtracted) / elapsed;
+            lastExtracted = transfer.transferred;
+            lastTimestamp = now;
+        }
+
+        if (info.status === 'completed') {
+            transfer.status = 'completed';
+            transfer.transferred = info.extracted_size || transfer.total || transfer.transferred;
+            transfer.total = transfer.transferred || transfer.total;
+            transfer.speed = 0;
+            renderTransfers();
+            const files = info.extracted_files || 0;
+            showToast(`Extracted ${files} file(s) to ${info.destination || 'same folder'}`, 'success');
+            browseDirectory(state.currentPath);
+            return;
+        }
+        if (info.status === 'error') {
+            transfer.status = 'error';
+            transfer.error = info.error || 'Extraction failed';
+            transfer.speed = 0;
+            renderTransfers();
+            showToast(`Extraction failed: ${transfer.error}`, 'error');
+            return;
+        }
+        if (info.status === 'cancelled') {
+            transfer.status = 'cancelled';
+            transfer.speed = 0;
+            renderTransfers();
+            return;
+        }
+        transfer.status = info.status === 'cancelling' ? 'cancelling' : 'running';
+        renderTransfers();
+        await new Promise(r => setTimeout(r, EXTRACT_PROGRESS_POLL_MS));
+    }
+}
+
+// =============================================================
+// Settings modal
+// =============================================================
+
+async function openSettingsModal() {
+    try {
+        const resp = await fetch('/api/settings');
+        if (resp.ok) {
+            const s = await resp.json();
+            document.getElementById('settingsHost').value = s.host || '';
+            document.getElementById('settingsPort').value = s.port || '';
+            document.getElementById('settingsRootDir').value = s.root_directory || '';
+            document.getElementById('settingsMaxUpload').value = s.max_upload_size || '';
+            document.getElementById('settingsRead').checked = !!s.read_permission;
+            document.getElementById('settingsWrite').checked = !!s.write_permission;
+            document.getElementById('settingsDelete').checked = !!s.delete_permission;
+        }
+    } catch (e) { /* show modal even if we couldn't fetch */ }
+    openModal('settingsModal');
+}
+
+async function saveSettings() {
+    const payload = {
+        host: document.getElementById('settingsHost').value.trim(),
+        port: parseInt(document.getElementById('settingsPort').value, 10) || undefined,
+        root_directory: document.getElementById('settingsRootDir').value.trim(),
+        max_upload_size: parseInt(document.getElementById('settingsMaxUpload').value, 10) || undefined,
+        read_permission: document.getElementById('settingsRead').checked,
+        write_permission: document.getElementById('settingsWrite').checked,
+        delete_permission: document.getElementById('settingsDelete').checked,
+    };
+    // Remove undefined values
+    Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
+
+    try {
+        const resp = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Settings saved successfully', 'success');
+            closeModal('settingsModal');
+        } else {
+            showToast(data.error || 'Failed to save settings', 'error');
+        }
+    } catch (e) {
+        showToast('Network error: ' + e.message, 'error');
     }
 }
 
