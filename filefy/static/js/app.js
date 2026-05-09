@@ -17,7 +17,10 @@ const state = {
     // entry holds the data needed to render and control the transfer.
     transfers: {},
     transferPanelHidden: true,
-    transferPanelMinimized: false
+    transferPanelMinimized: false,
+    // Peer tab support
+    activeTabPeer: null,    // null = local tab; string peerId = remote tab
+    remoteTabs: {},         // peerId -> { currentPath: string, selectedItem }
 };
 
 // DOM Elements
@@ -28,6 +31,8 @@ const elements = {
     searchInput: document.getElementById('searchInput'),
     statusText: document.getElementById('statusText'),
     itemCount: document.getElementById('itemCount'),
+    peerBadge: document.getElementById('peerBadge'),
+    peerBadgeText: document.getElementById('peerBadgeText'),
     contextMenu: document.getElementById('contextMenu'),
     detailsPanel: document.getElementById('detailsPanel'),
     detailsContent: document.getElementById('detailsContent'),
@@ -148,11 +153,16 @@ function setupEventListeners() {
 
     // Refresh button
     document.getElementById('refreshBtn').addEventListener('click', () => {
-        browseDirectory(state.currentPath);
+        if (state.activeTabPeer) {
+            const tab = state.remoteTabs[state.activeTabPeer];
+            browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+        } else {
+            browseDirectory(state.currentPath);
+        }
         showToast('Refreshed', 'info');
     });
 
-    // View toggle buttons
+    // View toggle buttons (local)
     document.getElementById('gridViewBtn').addEventListener('click', () => {
         setViewMode('grid');
     });
@@ -161,7 +171,16 @@ function setupEventListeners() {
         setViewMode('list');
     });
 
-    // Upload button
+    // View toggle buttons (remote)
+    document.getElementById('remoteGridViewBtn').addEventListener('click', () => {
+        setViewMode('grid');
+    });
+
+    document.getElementById('remoteListViewBtn').addEventListener('click', () => {
+        setViewMode('list');
+    });
+
+    // Upload button (local)
     document.getElementById('uploadBtn').addEventListener('click', () => {
         openModal('uploadModal');
         document.getElementById('uploadFileList').innerHTML = '';
@@ -169,12 +188,39 @@ function setupEventListeners() {
         document.getElementById('startUploadBtn').disabled = true;
     });
 
-    // New folder button
+    // New folder button (local)
     document.getElementById('newFolderBtn').addEventListener('click', () => {
         openModal('newFolderModal');
         document.getElementById('folderName').value = '';
         document.getElementById('folderName').focus();
     });
+
+    // Remote toolbar: Upload to Remote
+    document.getElementById('remoteUploadBtn').addEventListener('click', () => {
+        if (!state.activeTabPeer) return;
+        openModal('uploadModal');
+        document.getElementById('uploadFileList').innerHTML = '';
+        state.uploadFiles = [];
+        document.getElementById('startUploadBtn').disabled = true;
+        // Mark upload as "to remote" — handled in the upload start handler
+        document.getElementById('uploadModal').dataset.remoteUploadPeer = state.activeTabPeer;
+        const tab = state.remoteTabs[state.activeTabPeer];
+        document.getElementById('uploadModal').dataset.remoteUploadPath = tab ? tab.currentPath : '';
+    });
+
+    // Remote toolbar: New Folder on remote
+    document.getElementById('remoteNewFolderBtn').addEventListener('click', () => {
+        if (!state.activeTabPeer) return;
+        openModal('remoteNewFolderModal');
+        document.getElementById('remoteFolderName').value = '';
+        document.getElementById('remoteFolderName').focus();
+    });
+
+    // Remote New Folder confirm
+    document.getElementById('confirmRemoteNewFolderBtn').addEventListener('click', remoteCreateFolder);
+
+    // Remote Rename confirm
+    document.getElementById('confirmRemoteRenameBtn').addEventListener('click', confirmRemoteRename);
 
     // Remote download button
     document.getElementById('newRemoteDownload').addEventListener('click', () => {
@@ -326,21 +372,34 @@ function setupEventListeners() {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
         if (e.key === 'Delete' && state.selectedItem) {
-            showDeleteConfirm();
+            if (state.activeTabPeer) {
+                remoteDeleteConfirm();
+            } else {
+                showDeleteConfirm();
+            }
         } else if (e.key === 'F2' && state.selectedItem) {
             e.preventDefault();
-            showRenameDialog();
+            if (state.activeTabPeer) {
+                showRemoteRenameDialog();
+            } else {
+                showRenameDialog();
+            }
         } else if (e.key === 'F5') {
             e.preventDefault();
-            browseDirectory(state.currentPath);
+            if (state.activeTabPeer) {
+                const tab = state.remoteTabs[state.activeTabPeer];
+                browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+            } else {
+                browseDirectory(state.currentPath);
+            }
             showToast('Refreshed', 'info');
-        } else if (e.ctrlKey && e.key === 'c' && state.selectedItem) {
+        } else if (e.ctrlKey && e.key === 'c' && state.selectedItem && !state.activeTabPeer) {
             e.preventDefault();
             copyItem();
-        } else if (e.ctrlKey && e.key === 'x' && state.selectedItem) {
+        } else if (e.ctrlKey && e.key === 'x' && state.selectedItem && !state.activeTabPeer) {
             e.preventDefault();
             cutItem();
-        } else if (e.ctrlKey && e.key === 'v' && state.clipboard) {
+        } else if (e.ctrlKey && e.key === 'v' && state.clipboard && !state.activeTabPeer) {
             e.preventDefault();
             showPasteDialog();
         } else if (e.key === 'Escape') {
@@ -352,6 +411,11 @@ function setupEventListeners() {
 
 // Browse Directory
 async function browseDirectory(path) {
+    // If a remote peer tab is active, route to the remote browser instead.
+    if (state.activeTabPeer) {
+        await browseRemoteDirectory(state.activeTabPeer, path);
+        return;
+    }
     showLoading();
     try {
         const response = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
@@ -485,7 +549,21 @@ function clearSelection() {
 function openItem(item) {
     const path = item.dataset.path;
     const isDir = item.dataset.isDir === 'true';
-    
+
+    if (state.activeTabPeer) {
+        if (isDir) {
+            browseRemoteDirectory(state.activeTabPeer, path);
+        } else {
+            // In remote tab: offer to download the file to the local current path
+            const peer = bridgeState.peers.find(p => p.id === state.activeTabPeer);
+            const fileName = path.split('/').pop();
+            if (confirm(`Download "${fileName}" from ${peer ? peer.name : 'remote'} to local "${state.currentPath}"?`)) {
+                doRemoteFilePull(state.activeTabPeer, [path], state.currentPath);
+            }
+        }
+        return;
+    }
+
     if (isDir) {
         browseDirectory(path);
     } else {
@@ -554,15 +632,27 @@ async function showItemDetails(path) {
 // Set View Mode
 function setViewMode(mode) {
     state.viewMode = mode;
-    
-    document.getElementById('gridViewBtn').classList.toggle('active', mode === 'grid');
-    document.getElementById('listViewBtn').classList.toggle('active', mode === 'list');
-    
+
+    // Sync both view-toggle button groups.
+    ['gridViewBtn', 'remoteGridViewBtn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', mode === 'grid');
+    });
+    ['listViewBtn', 'remoteListViewBtn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', mode === 'list');
+    });
+
     elements.fileList.classList.remove('grid-view', 'list-view');
     elements.fileList.classList.add(`${mode}-view`);
-    
-    // Re-render current directory
-    browseDirectory(state.currentPath);
+
+    // Re-render current directory.
+    if (state.activeTabPeer) {
+        const tab = state.remoteTabs[state.activeTabPeer];
+        browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+    } else {
+        browseDirectory(state.currentPath);
+    }
 }
 
 // Context Menu
@@ -625,6 +715,50 @@ function hideContextMenu() {
 }
 
 function handleContextAction(action) {
+    // When a remote peer tab is active, certain actions are intercepted and
+    // proxied to the peer server; non-applicable local actions are ignored.
+    if (state.activeTabPeer) {
+        switch (action) {
+            case 'open':
+                if (!state.selectedItem) return;
+                const remoteEl = document.querySelector(`.file-item[data-path="${CSS.escape(state.selectedItem.path)}"]`);
+                if (remoteEl) openItem(remoteEl);
+                break;
+            case 'download':
+                if (!state.selectedItem) return;
+                doRemoteFilePull(state.activeTabPeer, [state.selectedItem.path], state.currentPath);
+                break;
+            case 'delete':
+                if (!state.selectedItem) return;
+                remoteDeleteConfirm();
+                break;
+            case 'rename':
+                if (!state.selectedItem) return;
+                showRemoteRenameDialog();
+                break;
+            case 'newfolder':
+                openModal('remoteNewFolderModal');
+                document.getElementById('remoteFolderName').value = '';
+                document.getElementById('remoteFolderName').focus();
+                break;
+            case 'refresh': {
+                const tab = state.remoteTabs[state.activeTabPeer];
+                browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+                showToast('Refreshed', 'info');
+                break;
+            }
+            case 'bridge-send':
+                // In remote tab, "Send to Server" sends a remote file to ANOTHER peer.
+                // Skip — not meaningful in this context.
+                showToast('Switch to Local tab to send local files to a server.', 'info');
+                break;
+            default:
+                // Silently skip local-only actions (copy, cut, paste, compress, etc.)
+                break;
+        }
+        return;
+    }
+
     switch (action) {
         case 'open':
             if (!state.selectedItem) return;
@@ -1287,10 +1421,26 @@ function handleFileSelection(files) {
 
 function uploadFiles() {
     if (state.uploadFiles.length === 0) return;
+
+    const modal = document.getElementById('uploadModal');
+    const remoteUploadPeer = modal.dataset.remoteUploadPeer || '';
+    const remoteUploadPath = modal.dataset.remoteUploadPath || '';
+    delete modal.dataset.remoteUploadPeer;
+    delete modal.dataset.remoteUploadPath;
+
     const filesToUpload = state.uploadFiles.slice();
     state.uploadFiles = [];
     closeModal('uploadModal');
-    filesToUpload.forEach(file => startManagedUpload(file, state.currentPath));
+
+    // Upload to local server first; if a remote target is set, each
+    // transfer will automatically push to the peer once it completes.
+    const localDest = state.currentPath;
+    filesToUpload.forEach(file => {
+        const transfer = startManagedUpload(file, localDest);
+        if (remoteUploadPeer && remoteUploadPath) {
+            transfer._remoteUploadTarget = { peerId: remoteUploadPeer, remotePath: remoteUploadPath };
+        }
+    });
     showTransferCenter();
 }
 
@@ -1310,7 +1460,8 @@ async function startManagedUpload(file, destPath) {
         _uploadId: null,
         _xhr: null,
         _pauseRequested: false,
-        _cancelRequested: false
+        _cancelRequested: false,
+        _remoteUploadTarget: null  // set by uploadFiles() for "Upload to Remote" flow
     };
 
     transfer.pause = () => {
@@ -1343,31 +1494,36 @@ async function startManagedUpload(file, destPath) {
 
     addTransfer(transfer);
 
-    try {
-        const initResponse = await fetch('/api/upload-init', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                filename: file.name,
-                path: destPath,
-                size: file.size
-            })
-        });
-        const initData = await initResponse.json();
-        if (!initResponse.ok) {
-            throw new Error(initData.error || 'Failed to start upload');
+    // Return immediately so the caller can attach metadata (e.g.
+    // _remoteUploadTarget) before the async upload sequence begins.
+    setTimeout(async () => {
+        try {
+            const initResponse = await fetch('/api/upload-init', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: file.name,
+                    path: destPath,
+                    size: file.size
+                })
+            });
+            const initData = await initResponse.json();
+            if (!initResponse.ok) {
+                throw new Error(initData.error || 'Failed to start upload');
+            }
+            transfer._uploadId = initData.upload_id;
+            transfer.filename = initData.filename || transfer.filename;
+        } catch (err) {
+            transfer.status = 'error';
+            transfer.error = err.message;
+            renderTransfers();
+            showToast(`Upload failed to start: ${err.message}`, 'error');
+            return;
         }
-        transfer._uploadId = initData.upload_id;
-        transfer.filename = initData.filename || transfer.filename;
-    } catch (err) {
-        transfer.status = 'error';
-        transfer.error = err.message;
-        renderTransfers();
-        showToast(`Upload failed to start: ${err.message}`, 'error');
-        return;
-    }
+        runUpload(transfer);
+    }, 0);
 
-    runUpload(transfer);
+    return transfer;
 }
 
 function sendChunk(transfer, chunk, start, total) {
@@ -1472,6 +1628,26 @@ async function runUpload(transfer) {
         // currently-displayed directory.
         if (transfer._destPath === state.currentPath) {
             browseDirectory(state.currentPath);
+        }
+        // If this was an "Upload to Remote" operation, automatically push the
+        // newly-uploaded local file to the remote peer.
+        if (transfer._remoteUploadTarget) {
+            const { peerId, remotePath } = transfer._remoteUploadTarget;
+            const localPath = transfer._destPath.replace(/\/+$/, '') + '/' + transfer.filename;
+            await fetch('/api/bridge/push', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    peer_id: peerId,
+                    files: [localPath],
+                    destination: remotePath,
+                }),
+            }).then(r => r.json()).then(data => {
+                if (data.task_id) {
+                    showToast('Pushing to remote server…', 'info');
+                    showTransferCenter();
+                }
+            }).catch(() => {});
         }
     } catch (err) {
         transfer.status = 'error';
@@ -2110,6 +2286,439 @@ function formatSize(bytes) {
 }
 
 // =============================================================
+// Peer Tabs  – connect / switch / browse remote server
+// =============================================================
+
+// ── Tab lifecycle ─────────────────────────────────────────────────────────
+
+function addPeerTab(peer) {
+    if (document.getElementById('tab-' + peer.id)) return; // already exists
+
+    // Initialise per-peer browse state.
+    if (!state.remoteTabs[peer.id]) {
+        state.remoteTabs[peer.id] = { currentPath: '', selectedItem: null };
+    }
+
+    const tabBar = document.getElementById('tabBar');
+    if (!tabBar) return;
+
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.id = 'tab-' + peer.id;
+    tab.dataset.tab = peer.id;
+    tab.innerHTML = `
+        <i class="fas fa-server"></i>
+        <span>${escapeHtml(peer.name)}</span>
+        <span class="tab-close" title="Disconnect and close tab" data-peer-id="${escapeHtml(peer.id)}">
+            <i class="fas fa-times"></i>
+        </span>
+    `;
+    tab.addEventListener('click', (e) => {
+        if (e.target.closest('.tab-close')) return; // handled separately
+        switchToPeerTab(peer.id);
+    });
+    tab.querySelector('.tab-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        disconnectBridgePeer(peer.id);
+    });
+
+    tabBar.appendChild(tab);
+    updatePeerBadge();
+}
+
+function removePeerTab(peerId) {
+    const tab = document.getElementById('tab-' + peerId);
+    if (tab) tab.remove();
+    delete state.remoteTabs[peerId];
+
+    // If the removed tab was active, switch to local.
+    if (state.activeTabPeer === peerId) {
+        switchToLocalTab();
+    }
+    updatePeerBadge();
+}
+
+function switchToLocalTab() {
+    state.activeTabPeer = null;
+
+    // Tab bar: deactivate all, activate local.
+    document.querySelectorAll('#tabBar .tab').forEach(t => t.classList.remove('active'));
+    const localTab = document.getElementById('tab-local');
+    if (localTab) localTab.classList.add('active');
+
+    // Toolbar: show local actions, hide remote.
+    document.getElementById('localToolbarActions').classList.remove('hidden');
+    document.getElementById('remoteToolbarActions').classList.add('hidden');
+
+    // Restore local file list.
+    browseDirectory(state.currentPath || serverHome || '~');
+    updatePeerBadge();
+}
+
+function switchToPeerTab(peerId) {
+    state.activeTabPeer = peerId;
+
+    // Tab bar.
+    document.querySelectorAll('#tabBar .tab').forEach(t => t.classList.remove('active'));
+    const tab = document.getElementById('tab-' + peerId);
+    if (tab) tab.classList.add('active');
+
+    // Toolbar.
+    document.getElementById('localToolbarActions').classList.add('hidden');
+    document.getElementById('remoteToolbarActions').classList.remove('hidden');
+
+    // Browse the remote server (starting from root or last known path).
+    const peerTab = state.remoteTabs[peerId];
+    browseRemoteDirectory(peerId, peerTab ? peerTab.currentPath : '');
+    updatePeerBadge();
+}
+
+// ── Status bar peer badge ─────────────────────────────────────────────────
+
+function updatePeerBadge() {
+    const badge = elements.peerBadge;
+    const badgeText = elements.peerBadgeText;
+    if (!badge || !badgeText) return;
+
+    const connected = bridgeState.peers || [];
+    if (!connected.length) {
+        badge.style.display = 'none';
+        return;
+    }
+
+    badge.style.display = '';
+    if (state.activeTabPeer) {
+        const peer = connected.find(p => p.id === state.activeTabPeer);
+        badgeText.textContent = `Browsing: ${peer ? peer.name : state.activeTabPeer}`;
+    } else {
+        const names = connected.map(p => p.name).join(', ');
+        badgeText.textContent = `Connected to: ${names}`;
+    }
+}
+
+// ── Remote directory browse ───────────────────────────────────────────────
+
+async function browseRemoteDirectory(peerId, path) {
+    showLoading();
+    try {
+        const params = new URLSearchParams({ peer_id: peerId });
+        if (path) params.set('path', path);
+        const resp = await fetch('/api/bridge/peer-browse?' + params);
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Remote browse failed', 'error');
+            hideLoading();
+            return;
+        }
+
+        const currentPath = data.current_path || path || '/';
+
+        // Update per-peer tab state.
+        if (!state.remoteTabs[peerId]) state.remoteTabs[peerId] = {};
+        state.remoteTabs[peerId].currentPath = currentPath;
+
+        // Render breadcrumb with remote prefix.
+        renderRemoteBreadcrumb(peerId, currentPath, data.parent_path);
+
+        // Render file list using the existing component.
+        renderRemoteFileList(data.items || []);
+        elements.itemCount.textContent = `${(data.items || []).length} items`;
+        elements.statusText.textContent = 'Remote';
+
+        clearSelection();
+    } catch (e) {
+        showToast('Network error while browsing remote', 'error');
+    }
+    hideLoading();
+}
+
+function renderRemoteBreadcrumb(peerId, path, parentPath) {
+    const peer = bridgeState.peers.find(p => p.id === peerId);
+    const peerName = peer ? peer.name : 'Remote';
+
+    const parts = path.split('/').filter(p => p);
+    let currentPath = '';
+
+    let html = `<span class="breadcrumb-item" data-remote-peer="${escapeHtml(peerId)}" data-path="/">
+        <i class="fas fa-server"></i>&thinsp;${escapeHtml(peerName)}
+    </span>`;
+
+    parts.forEach((part, index) => {
+        currentPath += '/' + part;
+        const isLast = index === parts.length - 1;
+        html += `<span class="breadcrumb-separator">/</span>
+            <span class="breadcrumb-item ${isLast ? 'active' : ''}"
+                  data-remote-peer="${escapeHtml(peerId)}"
+                  data-path="${escapeHtml(currentPath)}">${escapeHtml(part)}</span>`;
+    });
+
+    elements.breadcrumb.innerHTML = html;
+
+    elements.breadcrumb.querySelectorAll('.breadcrumb-item[data-remote-peer]').forEach(item => {
+        item.addEventListener('click', () => {
+            browseRemoteDirectory(item.dataset.remotePeer, item.dataset.path);
+        });
+    });
+}
+
+function renderRemoteFileList(items) {
+    if (!items.length) {
+        elements.fileList.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-folder-open"></i>
+                <p>This folder is empty</p>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '';
+    if (state.viewMode === 'grid') {
+        items.forEach(item => {
+            const icon = item.icon || (item.is_dir ? 'fa-folder' : 'fa-file');
+            html += `<div class="file-item remote-file-item"
+                          data-path="${escapeHtml(item.path)}"
+                          data-is-dir="${item.is_dir}"
+                          data-name="${escapeHtml(item.name)}">
+                <i class="fas ${sanitizeIconClass(icon)} file-icon"></i>
+                <span class="file-name">${escapeHtml(item.name)}</span>
+            </div>`;
+        });
+    } else {
+        items.forEach(item => {
+            const icon = item.icon || (item.is_dir ? 'fa-folder' : 'fa-file');
+            html += `<div class="file-item remote-file-item"
+                          data-path="${escapeHtml(item.path)}"
+                          data-is-dir="${item.is_dir}"
+                          data-name="${escapeHtml(item.name)}">
+                <i class="fas ${sanitizeIconClass(icon)} file-icon"></i>
+                <span class="file-name">${escapeHtml(item.name)}</span>
+                <span class="file-size">${item.size_formatted || ''}</span>
+                <span class="file-modified">${item.modified || ''}</span>
+                <span class="file-perms">${item.permissions || ''}</span>
+            </div>`;
+        });
+    }
+
+    elements.fileList.innerHTML = html;
+
+    elements.fileList.querySelectorAll('.file-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Store selected item (same shape as local selectItem).
+            clearSelection();
+            item.classList.add('selected');
+            state.selectedItem = {
+                path: item.dataset.path,
+                isDir: item.dataset.isDir === 'true',
+                name: item.dataset.name,
+            };
+            if (state.activeTabPeer) {
+                state.remoteTabs[state.activeTabPeer].selectedItem = state.selectedItem;
+                showRemoteItemDetails(state.selectedItem);
+            }
+        });
+
+        item.addEventListener('dblclick', () => {
+            openItem(item);
+        });
+
+        item.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            // Re-use selectItem-equivalent above.
+            clearSelection();
+            item.classList.add('selected');
+            state.selectedItem = {
+                path: item.dataset.path,
+                isDir: item.dataset.isDir === 'true',
+                name: item.dataset.name,
+            };
+            if (state.activeTabPeer) {
+                state.remoteTabs[state.activeTabPeer].selectedItem = state.selectedItem;
+            }
+            showContextMenu(e.clientX, e.clientY);
+        });
+    });
+}
+
+// Show a details panel for a remote item (no server round-trip needed
+// because we already have all the metadata from the browse response).
+function showRemoteItemDetails(item) {
+    const peer = bridgeState.peers.find(p => p.id === state.activeTabPeer);
+    const peerName = peer ? peer.name : 'Remote';
+    const icon = item.isDir ? 'fa-folder' : 'fa-file';
+
+    elements.detailsContent.innerHTML = `
+        <div class="detail-preview">
+            <i class="fas ${icon} file-icon" style="font-size:48px;color:var(--accent-primary);margin:16px 0;display:block;text-align:center;"></i>
+        </div>
+        <div class="detail-info">
+            <div class="detail-name">${escapeHtml(item.name || item.path.split('/').pop())}</div>
+            <div class="detail-row">
+                <span class="label">Server</span>
+                <span class="value">${escapeHtml(peerName)}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Path</span>
+                <span class="value" style="word-break:break-all;font-size:11px;">${escapeHtml(item.path)}</span>
+            </div>
+        </div>
+        ${!item.isDir ? `<div class="detail-actions">
+            <button class="btn btn-primary btn-full" onclick="doRemoteFilePull(state.activeTabPeer, [state.selectedItem.path], state.currentPath)">
+                <i class="fas fa-download"></i> Download to Local
+            </button>
+        </div>` : ''}
+    `;
+    elements.detailsPanel.classList.add('open');
+}
+
+// ── Remote file operations ────────────────────────────────────────────────
+
+/** Pull remote file(s) to local destination — wrapper used by single-file download. */
+async function doRemoteFilePull(peerId, remotePaths, localDest) {
+    if (!peerId || !remotePaths.length || !localDest) {
+        showToast('Missing parameters for download', 'warning');
+        return;
+    }
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/pull', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peer_id: peerId, files: remotePaths, destination: localDest }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showToast(data.error || 'Download failed', 'error');
+        } else {
+            showToast('Download started', 'success');
+            showTransferCenter();
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+    hideLoading();
+}
+
+function remoteDeleteConfirm() {
+    if (!state.selectedItem) return;
+    const name = state.selectedItem.name || state.selectedItem.path.split('/').pop();
+    if (!confirm(`Delete "${name}" on the remote server? This cannot be undone.`)) return;
+    remoteDelete();
+}
+
+async function remoteDelete() {
+    if (!state.selectedItem || !state.activeTabPeer) return;
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/remote-op', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                peer_id: state.activeTabPeer,
+                op: 'delete',
+                payload: { path: state.selectedItem.path },
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Deleted on remote server', 'success');
+            clearSelection();
+            const tab = state.remoteTabs[state.activeTabPeer];
+            browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+        } else {
+            showToast(data.error || 'Delete failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+    hideLoading();
+}
+
+function showRemoteRenameDialog() {
+    if (!state.selectedItem) return;
+    const name = state.selectedItem.name || state.selectedItem.path.split('/').pop();
+    document.getElementById('remoteNewName').value = name;
+    openModal('remoteRenameModal');
+    document.getElementById('remoteNewName').focus();
+    document.getElementById('remoteNewName').select();
+}
+
+async function confirmRemoteRename() {
+    if (!state.selectedItem || !state.activeTabPeer) return;
+    const newName = document.getElementById('remoteNewName').value.trim();
+    if (!newName) { showToast('Enter a new name', 'warning'); return; }
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/remote-op', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                peer_id: state.activeTabPeer,
+                op: 'rename',
+                payload: { path: state.selectedItem.path, new_name: newName },
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Renamed on remote server', 'success');
+            closeModal('remoteRenameModal');
+            clearSelection();
+            const tab = state.remoteTabs[state.activeTabPeer];
+            browseRemoteDirectory(state.activeTabPeer, tab ? tab.currentPath : '');
+        } else {
+            showToast(data.error || 'Rename failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+    hideLoading();
+}
+
+async function remoteCreateFolder() {
+    if (!state.activeTabPeer) return;
+    const name = document.getElementById('remoteFolderName').value.trim();
+    if (!name) { showToast('Enter a folder name', 'warning'); return; }
+    const tab = state.remoteTabs[state.activeTabPeer];
+    const remotePath = tab ? tab.currentPath : '';
+    showLoading();
+    try {
+        const resp = await fetch('/api/bridge/remote-op', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                peer_id: state.activeTabPeer,
+                op: 'create-folder',
+                payload: { path: remotePath, name },
+            }),
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            showToast('Folder created on remote server', 'success');
+            closeModal('remoteNewFolderModal');
+            browseRemoteDirectory(state.activeTabPeer, remotePath);
+        } else {
+            showToast(data.error || 'Create folder failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+    hideLoading();
+}
+
+// ── Tab init (called from initBridge) ─────────────────────────────────────
+
+function initPeerTabs() {
+    const localTab = document.getElementById('tab-local');
+    if (localTab) {
+        localTab.addEventListener('click', () => {
+            if (!state.activeTabPeer) return; // already on local
+            switchToLocalTab();
+        });
+    }
+}
+
+// =============================================================
 // Server Bridge
 // =============================================================
 
@@ -2125,6 +2734,8 @@ const bridgeState = {
 // ── Initialisation ────────────────────────────────────────────────────────
 
 function initBridge() {
+    initPeerTabs();
+
     // Wire up sidebar buttons.
     const genBtn = document.getElementById('bridgeGenerateBtn');
     if (genBtn) genBtn.addEventListener('click', openBridgeGenerateModal);
@@ -2163,8 +2774,16 @@ async function refreshBridgePeers() {
     try {
         const resp = await fetch('/api/bridge/peers');
         if (!resp.ok) return;
+        const prevIds = new Set(bridgeState.peers.map(p => p.id));
         bridgeState.peers = await resp.json();
+
+        // Add tabs for newly-connected peers; remove tabs for gone peers.
+        const currentIds = new Set(bridgeState.peers.map(p => p.id));
+        bridgeState.peers.forEach(p => { if (!prevIds.has(p.id)) addPeerTab(p); });
+        prevIds.forEach(id => { if (!currentIds.has(id)) removePeerTab(id); });
+
         renderBridgePeerList();
+        updatePeerBadge();
     } catch (e) { /* ignore */ }
 }
 
@@ -2181,6 +2800,9 @@ function renderBridgePeerList() {
         <div class="bridge-peer-item" data-peer-id="${escapeHtml(p.id)}">
             <span class="bridge-peer-icon"><i class="fas fa-server"></i></span>
             <span class="bridge-peer-name" title="${escapeHtml(p.url)}">${escapeHtml(p.name)}</span>
+            <button class="btn btn-icon btn-tiny bridge-browse-btn" title="Open tab to browse this server" data-peer-id="${escapeHtml(p.id)}">
+                <i class="fas fa-external-link-alt"></i>
+            </button>
             <button class="btn btn-icon btn-tiny bridge-receive-btn" title="Receive files from this server" data-peer-id="${escapeHtml(p.id)}">
                 <i class="fas fa-download"></i>
             </button>
@@ -2190,6 +2812,9 @@ function renderBridgePeerList() {
         </div>
     `).join('');
 
+    container.querySelectorAll('.bridge-browse-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchToPeerTab(btn.dataset.peerId));
+    });
     container.querySelectorAll('.bridge-disconnect-btn').forEach(btn => {
         btn.addEventListener('click', () => disconnectBridgePeer(btn.dataset.peerId));
     });
@@ -2203,6 +2828,7 @@ async function disconnectBridgePeer(peerId) {
         const resp = await fetch(`/api/bridge/disconnect/${encodeURIComponent(peerId)}`, { method: 'DELETE' });
         if (resp.ok) {
             showToast('Peer disconnected', 'info');
+            removePeerTab(peerId);
             refreshBridgePeers();
         } else {
             const d = await resp.json();
@@ -2291,9 +2917,24 @@ async function doBridgeConnect() {
             showToast(data.error || 'Connection failed', 'error');
             return;
         }
-        showToast('Connected to "' + (data.peer_name || 'peer') + '"', 'success');
+        const peerName = data.peer_name || 'peer';
+        showToast('Connected to "' + peerName + '"', 'success');
+
+        // Update status bar immediately.
+        elements.statusText.textContent = `Connected to: ${peerName}`;
+        setTimeout(() => {
+            if (elements.statusText.textContent.startsWith('Connected to:')) {
+                elements.statusText.textContent = 'Ready';
+            }
+        }, 5000);
+
         closeModal('bridgeConnectModal');
-        refreshBridgePeers();
+        // Refresh peer list; the peer list handler will add the tab automatically.
+        await refreshBridgePeers();
+
+        // Auto-switch to the new peer's tab if one was created.
+        const newPeer = bridgeState.peers.find(p => p.name === peerName || p.id === data.peer_id);
+        if (newPeer) switchToPeerTab(newPeer.id);
     } catch (e) {
         showToast('Network error: ' + e.message, 'error');
     }
