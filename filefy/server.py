@@ -106,6 +106,12 @@ PROGRESS_CAP_BEFORE_COMPLETE = 99.9
 # being stuck on a spinner for the entire duration of a multi-GB build.
 compression_tasks = {}
 compression_tasks_lock = threading.RLock()
+
+# Store progress for archive extraction tasks. Same background-thread
+# + polling pattern as compression.
+extraction_tasks = {}
+extraction_tasks_lock = threading.RLock()
+
 DOWNLOAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1699,6 +1705,394 @@ def cancel_compress(task_id):
 
 
 # ---------------------------------------------------------------------------
+# Extraction (decompress) – background task with progress polling
+# ---------------------------------------------------------------------------
+
+# Supported archive extensions that can be extracted.
+_EXTRACTABLE_EXTENSIONS = {".zip", ".tar", ".gz", ".bz2", ".tgz", ".xz"}
+
+
+def _is_extractable(path: str) -> bool:
+    """Return True when ``path`` has a recognised archive extension."""
+    lower = path.lower()
+    if lower.endswith(".tar.gz") or lower.endswith(".tar.bz2") or lower.endswith(".tar.xz"):
+        return True
+    return os.path.splitext(lower)[1] in _EXTRACTABLE_EXTENSIONS
+
+
+def _update_extraction_task(task_id, **updates):
+    with extraction_tasks_lock:
+        if task_id in extraction_tasks:
+            extraction_tasks[task_id].update(updates)
+
+
+def _get_extraction_task(task_id):
+    with extraction_tasks_lock:
+        return dict(extraction_tasks.get(task_id, {})) or None
+
+
+def _serialize_extraction_task(task):
+    total = task.get("total_size") or 0
+    extracted = task.get("extracted_size") or 0
+    return {
+        "id": task["id"],
+        "status": task.get("status", "pending"),
+        "extracted_size": extracted,
+        "extracted_size_formatted": format_size(extracted),
+        "total_size": total,
+        "total_size_formatted": format_size(total) if total else "Unknown",
+        "extracted_files": task.get("extracted_files", 0),
+        "total_files": task.get("total_files", 0),
+        "current_file": task.get("current_file") or "",
+        "archive": task.get("archive_path", ""),
+        "destination": task.get("destination", ""),
+        "error": task.get("error"),
+        "started_at": task.get("started_at"),
+    }
+
+
+def _extraction_task_runner(task_id):
+    """Background worker that extracts an archive and updates task progress."""
+    task = _get_extraction_task(task_id)
+    if not task:
+        return
+
+    archive_path = task["archive_path"]
+    destination = task["destination"]
+
+    _update_extraction_task(task_id, status="running")
+    try:
+        _run_extraction(task_id, archive_path, destination)
+    except Exception as exc:
+        logger.exception("Extraction task %s failed", task_id)
+        _update_extraction_task(task_id, status="error", error=str(exc))
+
+
+def _run_extraction(task_id, archive_path, destination):
+    """Extract *archive_path* into *destination*, updating task progress."""
+    lower = archive_path.lower()
+
+    def _should_cancel():
+        t = _get_extraction_task(task_id)
+        return bool(t and t.get("cancelled"))
+
+    os.makedirs(destination, exist_ok=True)
+
+    if lower.endswith(".zip"):
+        _extract_zip(task_id, archive_path, destination, _should_cancel)
+    elif (
+        lower.endswith(".tar.gz")
+        or lower.endswith(".tgz")
+        or lower.endswith(".tar.bz2")
+        or lower.endswith(".tar.xz")
+        or lower.endswith(".tar")
+    ):
+        _extract_tar(task_id, archive_path, destination, _should_cancel)
+    elif lower.endswith(".gz"):
+        _extract_gz(task_id, archive_path, destination, _should_cancel)
+    elif lower.endswith(".bz2"):
+        _extract_bz2(task_id, archive_path, destination, _should_cancel)
+    else:
+        raise ValueError(f"Unsupported archive format: {os.path.basename(archive_path)}")
+
+
+def _extract_zip(task_id, archive_path, destination, should_cancel):
+    import zipfile as _zipfile
+
+    with _zipfile.ZipFile(archive_path, "r") as zf:
+        members = zf.infolist()
+        total_files = len(members)
+        total_size = sum(m.file_size for m in members)
+        _update_extraction_task(task_id, total_files=total_files, total_size=total_size)
+
+        extracted_files = 0
+        extracted_size = 0
+        for member in members:
+            if should_cancel():
+                _update_extraction_task(task_id, status="cancelled")
+                return
+            _update_extraction_task(task_id, current_file=member.filename)
+            zf.extract(member, destination)
+            extracted_files += 1
+            extracted_size += member.file_size
+            _update_extraction_task(
+                task_id,
+                extracted_files=extracted_files,
+                extracted_size=extracted_size,
+            )
+
+    _update_extraction_task(
+        task_id,
+        status="completed",
+        extracted_files=extracted_files,
+        extracted_size=extracted_size,
+        current_file="",
+    )
+
+
+def _extract_tar(task_id, archive_path, destination, should_cancel):
+    with tarfile.open(archive_path, "r:*") as tf:
+        members = tf.getmembers()
+        total_files = sum(1 for m in members if m.isfile())
+        total_size = sum(m.size for m in members if m.isfile())
+        _update_extraction_task(task_id, total_files=total_files, total_size=total_size)
+
+        extracted_files = 0
+        extracted_size = 0
+        for member in members:
+            if should_cancel():
+                _update_extraction_task(task_id, status="cancelled")
+                return
+            if member.isfile():
+                _update_extraction_task(task_id, current_file=member.name)
+            tf.extract(member, destination, set_attrs=False)
+            if member.isfile():
+                extracted_files += 1
+                extracted_size += member.size
+                _update_extraction_task(
+                    task_id,
+                    extracted_files=extracted_files,
+                    extracted_size=extracted_size,
+                )
+
+    _update_extraction_task(
+        task_id,
+        status="completed",
+        extracted_files=extracted_files,
+        extracted_size=extracted_size,
+        current_file="",
+    )
+
+
+def _extract_gz(task_id, archive_path, destination, should_cancel):
+    """Extract a bare .gz file (not .tar.gz)."""
+    import gzip as _gzip
+
+    base = os.path.basename(archive_path)
+    out_name = base[:-3] if base.lower().endswith(".gz") else base + ".out"
+    out_path = os.path.join(destination, out_name)
+
+    total_size = os.path.getsize(archive_path)
+    _update_extraction_task(task_id, total_files=1, total_size=total_size)
+
+    extracted_size = 0
+    with _gzip.open(archive_path, "rb") as gz, open(out_path, "wb") as out:
+        while True:
+            if should_cancel():
+                _update_extraction_task(task_id, status="cancelled")
+                return
+            chunk = gz.read(1024 * 256)
+            if not chunk:
+                break
+            out.write(chunk)
+            extracted_size += len(chunk)
+            _update_extraction_task(task_id, extracted_size=extracted_size)
+
+    _update_extraction_task(
+        task_id,
+        status="completed",
+        extracted_files=1,
+        extracted_size=extracted_size,
+        current_file="",
+    )
+
+
+def _extract_bz2(task_id, archive_path, destination, should_cancel):
+    """Extract a bare .bz2 file (not .tar.bz2)."""
+    import bz2 as _bz2
+
+    base = os.path.basename(archive_path)
+    out_name = base[:-4] if base.lower().endswith(".bz2") else base + ".out"
+    out_path = os.path.join(destination, out_name)
+
+    total_size = os.path.getsize(archive_path)
+    _update_extraction_task(task_id, total_files=1, total_size=total_size)
+
+    extracted_size = 0
+    with _bz2.open(archive_path, "rb") as bz, open(out_path, "wb") as out:
+        while True:
+            if should_cancel():
+                _update_extraction_task(task_id, status="cancelled")
+                return
+            chunk = bz.read(1024 * 256)
+            if not chunk:
+                break
+            out.write(chunk)
+            extracted_size += len(chunk)
+            _update_extraction_task(task_id, extracted_size=extracted_size)
+
+    _update_extraction_task(
+        task_id,
+        status="completed",
+        extracted_files=1,
+        extracted_size=extracted_size,
+        current_file="",
+    )
+
+
+@app.route("/api/extract", methods=["POST"])
+def extract():
+    """Extract an archive in the same directory it lives in.
+
+    Body (JSON)::
+
+        { "path": "/abs/path/to/archive.zip" }
+
+    Returns a ``task_id`` immediately; poll ``/api/extract-progress/<id>``
+    to watch progress.
+    """
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "")
+    if not path:
+        return jsonify({"error": "path is required"}), 400
+
+    safe_path = get_safe_path(path)
+    # Verify the resolved path stays within the allowed base directory to
+    # prevent path-traversal / injection attacks.
+    if not safe_path.startswith(os.path.abspath(BASE_DIR)):
+        return jsonify({"error": "Access denied"}), 403
+
+    if not os.path.isfile(safe_path):
+        return jsonify({"error": "Archive not found"}), 404
+
+    if not _is_extractable(safe_path):
+        return jsonify({"error": "Unsupported archive format"}), 400
+
+    # Extract into the same directory as the archive.
+    destination = os.path.dirname(safe_path)
+
+    total_size = os.path.getsize(safe_path)
+
+    task_id = str(uuid.uuid4())
+    task = {
+        "id": task_id,
+        "status": "pending",
+        "archive_path": safe_path,
+        "destination": destination,
+        "total_files": 0,
+        "total_size": total_size,
+        "extracted_files": 0,
+        "extracted_size": 0,
+        "current_file": "",
+        "cancelled": False,
+        "error": None,
+        "started_at": time.time(),
+    }
+    with extraction_tasks_lock:
+        extraction_tasks[task_id] = task
+
+    thread = threading.Thread(target=_extraction_task_runner, args=(task_id,))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "task_id": task_id,
+        "archive": os.path.basename(safe_path),
+        "destination": destination,
+        "total_size": total_size,
+        "total_size_formatted": format_size(total_size),
+    })
+
+
+@app.route("/api/extract-progress/<task_id>")
+def extract_progress(task_id):
+    """Return progress information for a running extraction task."""
+    task = _get_extraction_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    return jsonify(_serialize_extraction_task(task))
+
+
+@app.route("/api/cancel-extract/<task_id>", methods=["POST"])
+def cancel_extract(task_id):
+    """Request cancellation of a running extraction task."""
+    task = _get_extraction_task(task_id)
+    if not task:
+        return jsonify({"error": "Task not found"}), 404
+    if task.get("status") in {"completed", "error", "cancelled"}:
+        return jsonify({"message": "Task is already finished"}), 409
+    _update_extraction_task(task_id, cancelled=True, status="cancelling")
+    return jsonify({"message": "Cancellation requested"})
+
+
+# ---------------------------------------------------------------------------
+# Settings API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings_api():
+    """Return current application settings that can be changed at runtime."""
+    if not CONFIG_AVAILABLE:
+        return jsonify({"error": "Configuration not available"}), 503
+    s = get_settings()
+    return jsonify({
+        "host": s.host,
+        "port": s.port,
+        "root_directory": s.root_directory,
+        "max_upload_size": s.max_upload_size,
+        "allowed_extensions": s.allowed_extensions,
+        "read_permission": s.read_permission,
+        "write_permission": s.write_permission,
+        "delete_permission": s.delete_permission,
+    })
+
+
+@app.route("/api/settings", methods=["POST"])
+def update_settings_api():
+    """Persist a subset of application settings.
+
+    Accepts a JSON body with any combination of the editable keys
+    returned by GET /api/settings. Unknown keys are silently ignored.
+    Changes are written to the settings.json config file and take
+    effect immediately for newly-created operations (upload size,
+    permissions). Server host/port changes require a restart.
+    """
+    if not CONFIG_AVAILABLE:
+        return jsonify({"error": "Configuration not available"}), 503
+
+    data = request.get_json(silent=True) or {}
+    s = get_settings()
+
+    changed = []
+    if "max_upload_size" in data:
+        val = int(data["max_upload_size"])
+        if val > 0:
+            s.max_upload_size = val
+            app.config["MAX_CONTENT_LENGTH"] = val
+            changed.append("max_upload_size")
+    if "root_directory" in data:
+        rd = str(data["root_directory"]).strip()
+        if rd:
+            s.root_directory = rd
+            changed.append("root_directory")
+    if "read_permission" in data:
+        s.read_permission = bool(data["read_permission"])
+        changed.append("read_permission")
+    if "write_permission" in data:
+        s.write_permission = bool(data["write_permission"])
+        changed.append("write_permission")
+    if "delete_permission" in data:
+        s.delete_permission = bool(data["delete_permission"])
+        changed.append("delete_permission")
+    if "host" in data:
+        s.host = str(data["host"]).strip() or s.host
+        changed.append("host")
+    if "port" in data:
+        p = int(data["port"])
+        if 1 <= p <= 65535:
+            s.port = p
+            changed.append("port")
+
+    try:
+        from .config import config_manager as _cm
+        _cm.save_settings()
+    except Exception as exc:
+        logger.warning("Could not persist settings: %s", exc)
+
+    return jsonify({"message": "Settings updated", "changed": changed})
+
+
+# ---------------------------------------------------------------------------
 # Resumable, chunked upload protocol
 # ---------------------------------------------------------------------------
 #
@@ -3148,7 +3542,7 @@ def disk_usage():
         return jsonify({"error": str(e)}), 500
 
 
-def run(host=None, port=None, debug=False, base_dir=None, tunnel=False):
+def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
     """Run the Filefy server.
 
     Args:
@@ -3156,9 +3550,11 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=False):
         port: Port to listen on (default: from config or 5000)
         debug: Enable debug mode (default: False)
         base_dir: Base directory for file management (default: user home)
-        tunnel: When True, also publish a Cloudflare quick tunnel and
-                print its public URL alongside the local URL. Requires
-                the ``cloudflared`` binary to be installed and on PATH.
+        tunnel: When True (the default), publish a Cloudflare quick tunnel
+                and print its public URL alongside the local URL. Requires
+                the ``cloudflared`` binary; it is installed automatically
+                if missing.  Pass ``tunnel=False`` or use ``--no-tunnel``
+                on the command line to disable.
     """
     global BASE_DIR
 
