@@ -115,15 +115,147 @@ filefy --no-tunnel  # local only
 
 ---
 
-### 6 · Server Bridge — Peer-to-Peer File Transfer
+### 6 · Server Bridge — Peer-to-Peer File Transfer Between Servers
 
-The Server Bridge lets two running Filefy instances talk to each other:
+This is arguably Filefy's most unique capability. The **Server Bridge** lets two independent Filefy instances connect to each other and exchange files — entirely through the browser, with no `scp`, no VPN, and no shared storage.
 
-1. Instance A generates a **pairing code** (`/api/bridge/generate-code`).
-2. Instance B enters the code to establish a direct connection (`/api/bridge/connect`).
-3. Either side can then **push** or **pull** files between servers without touching the client machine.
+#### The Problem It Solves
 
-This is useful for migrating files between two remote servers or syncing data across environments — again, entirely through the browser.
+Copying files from **Server A → Server B** traditionally means:
+1. SSH into Server A, `scp`/`rsync` to Server B, or
+2. Download to your laptop, then re-upload to Server B.
+
+With the Server Bridge, you open Filefy in a single browser tab and orchestrate the transfer directly between the two servers — your laptop never touches the data.
+
+#### Step-by-Step: Connecting Two Servers
+
+**On Server A** (the server being connected *to*):
+
+```
+GET /api/bridge/generate-code?url=https://server-a.example.com
+```
+
+This returns a compact, URL-safe Base64 pairing code that encodes `{ "url": "...", "token": "<uuid>" }`. The token is **one-time use** and expires after a configurable TTL (default: a few minutes).
+
+```json
+{ "code": "eyJ1cmwiOiAiaHR0cHM6Ly9zZXJ2ZXItYS5leGFtcGxlLmNvbSIsICJ0b2tlbiI6ICIuLi4ifQ==" }
+```
+
+**On Server B** (the initiating side), paste the code:
+
+```
+POST /api/bridge/connect
+{ "code": "<paste code here>", "name": "My Server B" }
+```
+
+Server B decodes the pairing code, calls Server A's **handshake endpoint**:
+
+```
+POST https://server-a.example.com/api/bridge/handshake
+{ "token": "<uuid>", "peer_name": "My Server B" }
+```
+
+Server A:
+1. Validates and **consumes** the token (one-time use — replays are rejected with HTTP 403).
+2. Issues a **session token** (UUID) scoped to Server B.
+3. Returns the session token plus Server A's hostname.
+
+From this point on, Server B authenticates every peer-facing request with:
+
+```
+Authorization: Bearer <session_token>
+```
+
+Both sides now show each other in their **Connected Peers** panel.
+
+#### Full Bridge API Surface
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/bridge/generate-code?url=<url>` | Generate one-time pairing code |
+| `POST` | `/api/bridge/handshake` | Validate token → issue session (called by remote) |
+| `POST` | `/api/bridge/connect` | Connect to a remote peer using a pairing code |
+| `GET` | `/api/bridge/peers` | List all connected peers |
+| `DELETE` | `/api/bridge/disconnect/<peer_id>` | Remove a peer |
+| `GET` | `/api/bridge/peer-browse?peer_id=<id>&path=<path>` | Browse the remote peer's filesystem |
+| `GET` | `/api/bridge/files` | Expose local files to authenticated peers |
+| `GET` | `/api/bridge/file?path=<path>` | Stream a local file to an authenticated peer |
+| `POST` | `/api/bridge/push` | Push local files **to** a peer (background task) |
+| `POST` | `/api/bridge/pull` | Pull remote files **from** a peer (background task) |
+| `POST` | `/api/bridge/receive-init` | Open chunked-upload session (called by pushing peer) |
+| `PUT` | `/api/bridge/receive-chunk/<id>` | Receive a chunk (called by pushing peer) |
+| `POST` | `/api/bridge/receive-complete/<id>` | Finalise a peer-pushed upload |
+| `GET` | `/api/bridge/transfers` | List all active/finished bridge transfers |
+| `GET` | `/api/bridge/transfer-progress/<task_id>` | Progress for one transfer |
+| `POST` | `/api/bridge/cancel-transfer/<task_id>` | Cancel an in-flight transfer |
+| `POST` | `/api/bridge/dismiss-transfer/<task_id>` | Remove a finished task from the list |
+| `POST` | `/api/bridge/remote-op` | Proxy a file-op (delete/rename/copy/move) to a peer |
+
+#### Push: Sending Files to a Peer
+
+```
+POST /api/bridge/push
+{
+  "peer_id":     "<uuid>",
+  "files":       ["/abs/local/path/file1.tar.gz"],
+  "destination": "/remote/dest/dir"
+}
+→ { "task_id": "<uuid>", "message": "Push started for 1 file(s)" }
+```
+
+The push runner:
+1. **Initiates** a chunked-upload session on the peer (`receive-init`).
+2. **Streams** the file in fixed-size chunks using `Content-Range` headers — the same protocol as a normal browser upload.
+3. **Finalises** the session (`receive-complete`).
+4. Repeats for every file in the list.
+5. Reports bytes transferred, current filename, and speed in real time.
+
+The transfer can be **cancelled** at any point; the partial file on the remote is cleaned up automatically.
+
+#### Pull: Fetching Files from a Peer
+
+```
+POST /api/bridge/pull
+{
+  "peer_id":     "<uuid>",
+  "files":       ["/remote/path/report.zip"],
+  "destination": "/local/dest/dir"
+}
+→ { "task_id": "<uuid>", "message": "Pull started for 1 file(s)" }
+```
+
+The pull runner streams the remote file using `requests` with `stream=True`, writing it to the local filesystem in chunks. Progress (bytes, speed, current filename) is updated every 500 ms.
+
+#### Remote File-System Operations
+
+Beyond transferring files, the bridge can proxy **file-system operations** to a peer so you can manage the remote server as if it were local:
+
+```
+POST /api/bridge/remote-op
+{
+  "peer_id": "<uuid>",
+  "op":      "delete" | "rename" | "create-folder" | "copy" | "move",
+  "payload": { ... }
+}
+```
+
+The payload is forwarded verbatim to the peer's regular API endpoint (`/api/delete`, `/api/rename`, etc.) and the response is returned as-is.
+
+#### Security Model
+
+- The pairing code is a **short-lived, one-time token** — intercepting an already-used code grants no access.
+- All peer-facing endpoints require `Authorization: Bearer <session_token>`. Missing or invalid tokens return **HTTP 401**.
+- File paths sent by peers are validated through the same `get_safe_path()` guard that protects the normal file manager — path-traversal attacks are blocked at **HTTP 403**.
+- Sessions persist only in memory; restarting the server invalidates all active sessions.
+
+#### Typical Use Cases
+
+| Scenario | How Bridge Helps |
+|---|---|
+| Migrate data between two cloud VMs | Push/pull directly; laptop never touched |
+| Sync a build artifact to a staging server | `push` a `.tar.gz` without SSH credentials |
+| Remote cleanup on a peer | `remote-op: delete` from your local browser |
+| Preview a remote file before pulling | `peer-browse` then open preview |
 
 ---
 
@@ -309,7 +441,9 @@ Flask Server (filefy/server.py)
     ├─ Background threads (daemon)
     │   ├─ compression_task_runner
     │   ├─ extraction_task_runner
-    │   └─ remote_download_task
+    │   ├─ remote_download_task
+    │   ├─ bridge_push_runner     (one per push task)
+    │   └─ bridge_pull_runner     (one per pull task)
     │
     └─ CloudflareTunnel (subprocess: cloudflared)
 ```
