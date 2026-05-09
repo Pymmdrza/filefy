@@ -1947,6 +1947,11 @@ def extract():
         return jsonify({"error": "path is required"}), 400
 
     safe_path = get_safe_path(path)
+    # Verify the resolved path stays within the allowed base directory to
+    # prevent path-traversal / injection attacks.
+    if not safe_path.startswith(os.path.abspath(BASE_DIR)):
+        return jsonify({"error": "Access denied"}), 403
+
     if not os.path.isfile(safe_path):
         return jsonify({"error": "Archive not found"}), 404
 
