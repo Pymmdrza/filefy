@@ -3,7 +3,7 @@
 Filer CLI - Command Line Interface
 
 Usage:
-    filefy                    # Start with defaults (port 5000, home directory)
+    filefy                    # Start in the current directory
     filefy --port 8080        # Start on custom port
     filefy --host 127.0.0.1   # Bind to specific host
     filefy --dir /path/to/dir # Start with custom directory
@@ -32,12 +32,10 @@ def main():
         details = get_details()
         default_host = settings.host
         default_port = settings.port
-        default_dir = settings.root_directory
         version = details.version or _PACKAGE_VERSION
     else:
         default_host = "0.0.0.0"
         default_port = 5000
-        default_dir = None
         version = _PACKAGE_VERSION
 
     parser = argparse.ArgumentParser(
@@ -46,7 +44,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  filefy                         Start with default settings
+  filefy                         Start in the current directory
   filefy -p 8080                 Use port 8080
   filefy --host 127.0.0.1        Only allow local connections
   filefy -d /home/user/files     Set base directory
@@ -77,9 +75,9 @@ Visit https://github.com/Pymmdrza/filefy for more information.
         "--dir",
         "--directory",
         type=str,
-        default=default_dir,
+        default=None,
         dest="directory",
-        help="Base directory for file management (default: home directory)",
+        help="Base directory for file management (default: current directory)",
     )
 
     parser.add_argument(
@@ -88,10 +86,22 @@ Visit https://github.com/Pymmdrza/filefy for more information.
         help="Enable Flask debug mode",
     )
 
-    parser.add_argument(
-        "--no-tunnel",
+    tunnel_group = parser.add_mutually_exclusive_group()
+    tunnel_group.add_argument(
+        "--tunnel",
         action="store_true",
-        dest="no_tunnel",
+        dest="tunnel",
+        default=None,
+        help=(
+            "Enable the automatic Cloudflare quick tunnel. This is the "
+            "default unless --no-tunnel is used."
+        ),
+    )
+
+    tunnel_group.add_argument(
+        "--no-tunnel",
+        action="store_false",
+        dest="tunnel",
         help=(
             "Disable the automatic Cloudflare quick tunnel. By default "
             "filefy tries to publish a public URL via cloudflared "
@@ -131,7 +141,7 @@ Visit https://github.com/Pymmdrza/filefy for more information.
             port=args.port,
             debug=args.debug,
             base_dir=args.directory,
-            tunnel=not args.no_tunnel,
+            tunnel=True if args.tunnel is None else args.tunnel,
         )
     except KeyboardInterrupt:
         print("\n\nFilefy stopped. Goodbye!")
