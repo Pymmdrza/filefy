@@ -74,9 +74,6 @@ def create_app(base_dir=None, secret_key=None):
         # Override with provided values
         if secret_key:
             application.config["SECRET_KEY"] = secret_key
-        if base_dir is None:
-            settings = get_settings()
-            base_dir = settings.root_directory
         application.config["BASE_DIR"] = resolve_base_dir(base_dir)
     else:
         application.config["SECRET_KEY"] = secret_key or os.urandom(24).hex()
