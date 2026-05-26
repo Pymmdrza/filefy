@@ -31,6 +31,8 @@ from flask import (
 )
 from werkzeug.utils import secure_filename
 
+from filefy.user_agent import build_filefy_user_agent
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.urandom(24).hex()
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024 * 1024  # 10GB max upload
@@ -41,6 +43,7 @@ ALLOWED_EXTENSIONS = {"*"}  # Allow all file types
 
 # Store download progress for remote downloads
 download_tasks = {}
+DOWNLOAD_USER_AGENT = build_filefy_user_agent()
 
 
 def get_safe_path(path):
@@ -234,10 +237,7 @@ def remote_download_task(task_id, url, destination_path):
         download_tasks[task_id]["status"] = "downloading"
         download_tasks[task_id]["started_at"] = time.time()
 
-        # Start the download with headers to mimic browser
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": DOWNLOAD_USER_AGENT}
         response = requests.get(
             url, stream=True, timeout=60, headers=headers, verify=True
         )

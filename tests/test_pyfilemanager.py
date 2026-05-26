@@ -277,6 +277,44 @@ class TestRemoteDownload:
         data = response.get_json()
         assert "invalid_urls" in data
 
+    def test_filefy_download_user_agent_format(self):
+        """Test Filefy download user-agent format includes version and platform."""
+        from filefy.user_agent import build_filefy_user_agent
+
+        user_agent = build_filefy_user_agent(
+            version="2.0.16",
+            system_name="Windows",
+            machine="AMD64",
+            architecture="64bit",
+        )
+
+        assert user_agent == "FileFy v2.0.16 (Windows NT; Win64; x64)"
+
+    def test_remote_download_uses_filefy_user_agent(self, monkeypatch):
+        """Test outbound remote downloads use the Filefy user-agent."""
+        import filefy.server as server
+
+        captured_headers = {}
+
+        def fail_after_capturing_headers(*args, **kwargs):
+            captured_headers.update(kwargs.get("headers") or {})
+            raise server.requests.exceptions.Timeout("stop after headers")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            task_id = "ua-test"
+            server.download_tasks[task_id] = {"status": "pending"}
+            monkeypatch.setattr(server.requests, "get", fail_after_capturing_headers)
+
+            server.remote_download_task(
+                task_id,
+                "https://example.com/file.txt",
+                tmpdir,
+            )
+
+            assert captured_headers["User-Agent"] == server.DOWNLOAD_USER_AGENT
+            assert captured_headers["User-Agent"].startswith("FileFy v")
+            server.download_tasks.clear()
+
     def test_remote_download_accepts_multiple_urls(self, client, monkeypatch):
         """Test starting multiple remote downloads in one request"""
         import filefy.server as server

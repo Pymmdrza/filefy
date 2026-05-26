@@ -37,6 +37,7 @@ from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
 
 from ._version import __version__ as _PACKAGE_VERSION
+from .user_agent import build_filefy_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -112,11 +113,7 @@ compression_tasks_lock = threading.RLock()
 extraction_tasks = {}
 extraction_tasks_lock = threading.RLock()
 
-DOWNLOAD_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+DOWNLOAD_USER_AGENT = build_filefy_user_agent()
 
 # In-memory state for resumable chunked uploads. Each entry maps an
 # upload-id (UUID) to a small dict describing the destination and the
