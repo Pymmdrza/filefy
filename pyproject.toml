@@ -77,7 +77,7 @@ version = {attr = "filefy._version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["filefy", "filefy.*"]
-exclude = ["tests*", "scripts*"]
+exclude = ["tests*"]
 
 [tool.setuptools.package-data]
 filefy = [
