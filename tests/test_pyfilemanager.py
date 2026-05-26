@@ -4,6 +4,7 @@ Tests for filefy
 
 import pytest
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -33,6 +34,28 @@ class TestPackageImports:
         from filefy.cli import main
 
         assert callable(main)
+
+
+class TestCLI:
+    """Test command-line startup behavior."""
+
+    def test_cli_defaults_to_current_directory_marker(self, monkeypatch):
+        """The CLI should let the server resolve '.' from the launch cwd."""
+        import filefy.server as server
+
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(sys, "argv", ["filefy", "--no-tunnel"])
+        monkeypatch.setattr(server, "run", fake_run)
+
+        from filefy.cli import main
+
+        main()
+
+        assert captured["base_dir"] == "."
 
 
 class TestFlaskApp:
