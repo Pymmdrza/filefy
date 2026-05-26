@@ -1,118 +1,123 @@
-# Automatically bump the patch version on every push to the default branch.
-#
-# When a commit lands on `main`/`master` that touches user-visible code,
-# this workflow:
-#   1. Reads the current version from `filefy/_version.py`.
-#   2. Increments the patch component (or honours `[bump major]` /
-#      `[bump minor]` directives in the head commit message).
-#   3. Commits the updated `_version.py` and `filefy/config/details.json`
-#      with `[skip ci]` so the bump itself does not loop.
-#   4. Creates and pushes a `vX.Y.Z` tag, which is the trigger for
-#      `publish.yml` (the PyPI release workflow).
-#
-# This guarantees that every release uploaded to PyPI carries a unique
-# version, eliminating the "File already exists" 400 error that occurs
-# when twine tries to re-upload an existing version.
-
 name: Auto Bump Version
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.gitignore'
-      
+      - "**/*.md"
+      - "docs/**"
+      - ".gitignore"
+
   workflow_dispatch:
     inputs:
       part:
-        description: 'Which version part to bump'
+        description: Version part to bump
         required: true
-        default: 'patch'
+        default: patch
         type: choice
-        options:
-          - patch
-          - minor
-          - major
+        options: [patch, minor, major]
 
 concurrency:
-  group: auto-bump-version
+  group: release-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   bump:
-    name: Bump version and tag
+    name: Bump version and create release tag
     runs-on: ubuntu-latest
-    # Skip if the commit was produced by this workflow itself.
-    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
-
-    permissions:
-      contents: write
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Sync branch
+        run: git pull --ff-only origin "${GITHUB_REF_NAME}"
 
       - name: Determine bump type
         id: bump_type
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "part=${{ github.event.inputs.part }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            PART="${{ inputs.part }}"
           else
-            MSG="${{ github.event.head_commit.message }}"
-            if echo "$MSG" | grep -q "\[bump major\]"; then
-              echo "part=major" >> "$GITHUB_OUTPUT"
-            elif echo "$MSG" | grep -q "\[bump minor\]"; then
-              echo "part=minor" >> "$GITHUB_OUTPUT"
+            MSG="$(git log -1 --pretty=%B)"
+
+            if grep -qi '\[bump major\]' <<< "$MSG"; then
+              PART="major"
+            elif grep -qi '\[bump minor\]' <<< "$MSG"; then
+              PART="minor"
             else
-              echo "part=patch" >> "$GITHUB_OUTPUT"
+              PART="patch"
             fi
           fi
 
+          echo "part=$PART" >> "$GITHUB_OUTPUT"
+
       - name: Bump version
         id: bump
+        shell: bash
         run: |
-          NEW_VERSION="$(python scripts/bump_version.py ${{ steps.bump_type.outputs.part }})"
-          echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Bumped to ${NEW_VERSION}"
+          set -euo pipefail
 
-      - name: Check if tag already exists
-        id: tag_check
-        run: |
-          TAG="v${{ steps.bump.outputs.new_version }}"
-          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          NEW_VERSION="$(python scripts/bump_version.py '${{ steps.bump_type.outputs.part }}')"
+
+          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $NEW_VERSION" >&2
+            exit 1
           fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure tag does not exist
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+
+          if git rev-parse "refs/tags/${{ steps.bump.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${{ steps.bump.outputs.tag }}" >&2
+            exit 1
+          fi
 
       - name: Commit version bump
-        if: steps.tag_check.outputs.exists == 'false'
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add filefy/_version.py filefy/config/details.json
+
           if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore(release): bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
+            echo "No version files changed." >&2
+            exit 1
           fi
 
+          git commit -m "chore(release): bump version to ${{ steps.bump.outputs.new_version }} [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
       - name: Create and push tag
-        if: steps.tag_check.outputs.exists == 'false'
+        shell: bash
         run: |
-          TAG="${{ steps.tag_check.outputs.tag }}"
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
+          set -euo pipefail
+
+          TAG="${{ steps.bump.outputs.tag }}"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
