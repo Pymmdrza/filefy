@@ -11,7 +11,7 @@
 # • Re-usable caching for pip & cibuildwheel
 # • Upload of wheels/sdist as GitHub Release assets
 
-name: CI / Release
+name: Build and Push to PyPi
 
 on:
   push:
