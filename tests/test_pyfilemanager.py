@@ -52,7 +52,16 @@ class TestFlaskApp:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(base_dir=tmpdir)
-            assert app.config["BASE_DIR"] == tmpdir
+            assert app.config["BASE_DIR"] == os.path.abspath(tmpdir)
+
+    def test_app_defaults_to_current_directory(self, monkeypatch):
+        """Test app creation defaults to the current working directory."""
+        from filefy import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.chdir(tmpdir)
+            app = create_app()
+            assert app.config["BASE_DIR"] == os.path.abspath(tmpdir)
 
     def test_app_routes_exist(self):
         """Test that main routes exist"""
@@ -381,6 +390,28 @@ class TestServerInfoAndTunnelParser:
         assert extract_tunnel_url("nothing here") is None
         assert extract_tunnel_url("") is None
         assert extract_tunnel_url(None) is None
+
+    def test_run_defaults_to_current_directory(self, monkeypatch):
+        import filefy.server as server
+
+        original_base_dir = server.BASE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.chdir(tmpdir)
+            monkeypatch.setattr(server.app, "run", lambda **kwargs: None)
+
+            try:
+                server.run(
+                    host="127.0.0.1",
+                    port=54321,
+                    debug=False,
+                    base_dir=None,
+                    tunnel=False,
+                )
+                assert server.BASE_DIR == os.path.abspath(tmpdir)
+                assert server.app.config["BASE_DIR"] == os.path.abspath(tmpdir)
+            finally:
+                server.BASE_DIR = original_base_dir
+                server.app.config["BASE_DIR"] = original_base_dir
 
 
 class TestCompressEndpoint:

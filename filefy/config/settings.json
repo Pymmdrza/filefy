@@ -5,7 +5,7 @@
       "port": 5000
     },
     "fileManager": {
-      "rootDirectory": "~",
+      "rootDirectory": ".",
       "maxUploadSize": 10737418240,
       "allowedExtensions": ["*"]
     },

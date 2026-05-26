@@ -52,6 +52,12 @@ except ImportError:
     CONFIG_AVAILABLE = False
 
 
+def resolve_base_dir(base_dir=None):
+    """Resolve a configured base directory to an absolute filesystem path."""
+    selected_dir = base_dir if base_dir else os.getcwd()
+    return os.path.abspath(os.path.expanduser(selected_dir))
+
+
 def create_app(base_dir=None, secret_key=None):
     """Create and configure the Flask application"""
     application = Flask(
@@ -68,19 +74,16 @@ def create_app(base_dir=None, secret_key=None):
         # Override with provided values
         if secret_key:
             application.config["SECRET_KEY"] = secret_key
-        if base_dir:
-            application.config["BASE_DIR"] = base_dir
-        else:
+        if base_dir is None:
             settings = get_settings()
-            application.config["BASE_DIR"] = os.path.expanduser(
-                settings.root_directory or "~"
-            )
+            base_dir = settings.root_directory
+        application.config["BASE_DIR"] = resolve_base_dir(base_dir)
     else:
         application.config["SECRET_KEY"] = secret_key or os.urandom(24).hex()
         application.config["MAX_CONTENT_LENGTH"] = (
             10 * 1024 * 1024 * 1024
         )  # 10GB max upload
-        application.config["BASE_DIR"] = base_dir or os.path.expanduser("~")
+        application.config["BASE_DIR"] = resolve_base_dir(base_dir)
 
     return application
 
@@ -89,7 +92,7 @@ def create_app(base_dir=None, secret_key=None):
 app = create_app()
 
 # Base directory for file management (can be changed to any directory)
-BASE_DIR = os.path.expanduser("~")
+BASE_DIR = app.config.get("BASE_DIR", resolve_base_dir())
 ALLOWED_EXTENSIONS = {"*"}  # Allow all file types
 
 # Store download progress for remote downloads
@@ -3564,7 +3567,8 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         details = get_details()
         host = host or settings.host
         port = port or settings.port
-        base_dir = base_dir or settings.root_directory
+        if base_dir is None:
+            base_dir = settings.root_directory
         app_name = details.app_name
         version = details.version or _PACKAGE_VERSION
     else:
@@ -3573,8 +3577,8 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         app_name = "Filefy"
         version = _PACKAGE_VERSION
 
-    if base_dir:
-        BASE_DIR = os.path.abspath(os.path.expanduser(base_dir))
+    BASE_DIR = resolve_base_dir(base_dir)
+    app.config["BASE_DIR"] = BASE_DIR
 
     # Determine the URL we should ask Cloudflare to publish. When the
     # server is bound to 0.0.0.0 the loopback address is the right

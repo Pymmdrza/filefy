@@ -51,7 +51,7 @@ pip install filefy
 ### Run the File Manager
 
 ```bash
-# Start with default settings (port 5000, home directory)
+# Start in the current directory (port 5000)
 filefy
 
 # Custom port
@@ -153,7 +153,8 @@ options:
   -h, --help            show this help message and exit
   -H, --host HOST       Host to bind the server to (default: 0.0.0.0)
   -p, --port PORT       Port to run the server on (default: 5000)
-  -d, --dir DIR         Base directory for file management (default: home)
+  -d, --dir DIR         Base directory for file management (default: current
+                        directory)
   --debug               Enable Flask debug mode
   --tunnel              Also publish the server through a Cloudflare quick
                         tunnel and print the public URL alongside the local
@@ -161,7 +162,7 @@ options:
   -v, --version         show program's version number and exit
 
 Examples:
-  filefy                         Start with default settings
+  filefy                         Start in the current directory
   filefy -p 8080                 Use port 8080
   filefy --host 127.0.0.1        Only allow local connections
   filefy -d /home/user/files     Set base directory
@@ -177,7 +178,7 @@ You can also use filefy programmatically:
 from filefy import app, create_app
 from filefy.server import run
 
-# Option 1: Run with default settings
+# Option 1: Run in the current directory
 run()
 
 # Option 2: Run with custom settings
