@@ -3,9 +3,9 @@
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](/)
 [![License](https://img.shields.io/badge/license-MIT-green)](/LICENSE)
 [![FileFy - Modern Cloud File Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
+[![FileFy Run On google Colab](https://img.shields.io/badge/Google-Colab-eb951b?style=plastic&logo=google&logoColor=white)](https://colab.research.google.com/drive/1dq45tz_wPe8KAd1nQ2zFqRIiWsqOlpXW?usp=sharing)
 
-
-A **professional web-based File Manager** Written in Python. Features a Beautiful Dark Theme UI, File Upload/Download, Remote URL Downloads With Progress Tracking, and Comprehensive File Operations.
+A **professional Modern web-based File Manager** Features Remote Upload/Download, Remote URL Downloads With Progress Tracking , and Peer-To-Peer Sync Transfer Data.
 
 <p align="center">
 <a title="pip install filefy" href="https://pypi.org/project/filefy"><img src="https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/pip.svg" alt="Modern Cloud File Manager - FileFy" width="305"/></a>
@@ -15,7 +15,7 @@ A **professional web-based File Manager** Written in Python. Features a Beautifu
 
 ## Features
 
-- **Professional Dark Theme UI** - Modern, responsive design
+- Peer-To-Peer Data Transfer (Upload & Download)
 - **File Upload** - Drag & drop or click to upload files. Uploads are
   chunked, with per-file progress, **pause / resume / cancel** controls,
   and they survive transient connection drops.
