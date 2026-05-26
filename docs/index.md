@@ -3,18 +3,19 @@
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](/)
 [![License](https://img.shields.io/badge/license-MIT-green)](/LICENSE)
 [![FileFy - Modern Cloud File Manager](https://img.shields.io/pypi/v/filefy?color=blue&logo=python)](https://pypi.org/project/filefy/ 'Filefy Modern Flask File Manager')
+[![FileFy Run On google Colab](https://img.shields.io/badge/Google-Colab-eb951b?style=plastic&logo=google&logoColor=white)](https://colab.research.google.com/drive/1dq45tz_wPe8KAd1nQ2zFqRIiWsqOlpXW?usp=sharing)
 
+A **professional Modern web-based File Manager** Features Remote Upload/Download, Remote URL Downloads With Progress Tracking , and Peer-To-Peer Sync Transfer Data.
 
-A **professional web-based File Manager** Written in Python. Features a Beautiful Dark Theme UI, File Upload/Download, Remote URL Downloads With Progress Tracking, and Comprehensive File Operations.
-
-
-[![pip install filefy](./pip.svg)](./pip.svg 'Modern Cloud File Manager - FileFy')
-[![Home Screen](./home-screen.png 'FileFy Home screen')](./home-screen.png 'home screen from filefy')
-
+<p align="center">
+<a title="pip install filefy" href="https://pypi.org/project/filefy"><img src="./pip.svg" alt="Modern Cloud File Manager - FileFy" width="305"/></a>
+<br/>
+<a title="FileFy - Home Screenshot" href="./home-screen.png"><img src="./home-screen.png" alt="Modern Cloud File Manager - FileFy" width="605"/></a>
+</p>
 
 ## Features
 
-- **Professional Dark Theme UI** - Modern, responsive design
+- Peer-To-Peer Data Transfer (Upload & Download)
 - **File Upload** - Drag & drop or click to upload files. Uploads are
   chunked, with per-file progress, **pause / resume / cancel** controls,
   and they survive transient connection drops.
@@ -22,14 +23,14 @@ A **professional web-based File Manager** Written in Python. Features a Beautifu
   HTTP Range support so the in-browser transfer manager can pause and
   resume large local downloads.
 - **Remote Download** - Download files from URLs with progress tracking
-  and **pause / resume / cancel** support.
+  and **pause / resume / cancel** support. [Screenshot](https://raw.githubusercontent.com/Pymmdrza/filefy/refs/heads/main/.github/home-screen.png 'FileFy - Download Process Screenshot')
 - **Compress** - Right-click any file or folder and create an archive
   (`.zip`, `.tar`, `.tar.gz`) directly on the server.
 - **Transfer Center** - Centered, project-themed panel that shows every
   in-flight transfer (upload, download, remote download). It can be
   minimised to the sidebar and never gets stuck on a Cancelled / Error
   state — every row has Pause, Resume, Cancel and Dismiss controls.
-- **Cloudflare Tunnel** - Optional `--tunnel` flag that publishes the
+- [**Cloudflare Tunnel**](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/ 'Cloudflare Tunnel') - Optional `--tunnel` flag that publishes the
   server through a free `*.trycloudflare.com` URL alongside the local
   one. Requires the `cloudflared` binary to be installed on PATH.
 - **File Operations** - Copy, move, rename, delete files and folders
