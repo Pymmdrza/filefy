@@ -1,10 +1,5 @@
 """
-Filer - A Professional Web-Based File Manager
-Features:
-- File upload and download
-- Remote URL download with progress tracking
-- File/folder operations (copy, move, delete, rename)
-- Professional dark theme UI
+Filefy - A Professional Modern Web-Based File Manager
 """
 
 import base64
@@ -37,6 +32,7 @@ from werkzeug.http import parse_options_header
 from werkzeug.utils import secure_filename
 
 from ._version import __version__ as _PACKAGE_VERSION
+from .user_agent import build_filefy_user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +46,12 @@ try:
     CONFIG_AVAILABLE = True
 except ImportError:
     CONFIG_AVAILABLE = False
+
+
+def resolve_base_dir(base_dir=None):
+    """Resolve a configured base directory to an absolute filesystem path."""
+    selected_dir = base_dir if base_dir else os.getcwd()
+    return os.path.abspath(os.path.expanduser(selected_dir))
 
 
 def create_app(base_dir=None, secret_key=None):
@@ -68,19 +70,13 @@ def create_app(base_dir=None, secret_key=None):
         # Override with provided values
         if secret_key:
             application.config["SECRET_KEY"] = secret_key
-        if base_dir:
-            application.config["BASE_DIR"] = base_dir
-        else:
-            settings = get_settings()
-            application.config["BASE_DIR"] = os.path.expanduser(
-                settings.root_directory or "~"
-            )
+        application.config["BASE_DIR"] = resolve_base_dir(base_dir)
     else:
         application.config["SECRET_KEY"] = secret_key or os.urandom(24).hex()
         application.config["MAX_CONTENT_LENGTH"] = (
             10 * 1024 * 1024 * 1024
         )  # 10GB max upload
-        application.config["BASE_DIR"] = base_dir or os.path.expanduser("~")
+        application.config["BASE_DIR"] = resolve_base_dir(base_dir)
 
     return application
 
@@ -89,7 +85,7 @@ def create_app(base_dir=None, secret_key=None):
 app = create_app()
 
 # Base directory for file management (can be changed to any directory)
-BASE_DIR = os.path.expanduser("~")
+BASE_DIR = app.config.get("BASE_DIR", resolve_base_dir())
 ALLOWED_EXTENSIONS = {"*"}  # Allow all file types
 
 # Store download progress for remote downloads
@@ -112,11 +108,7 @@ compression_tasks_lock = threading.RLock()
 extraction_tasks = {}
 extraction_tasks_lock = threading.RLock()
 
-DOWNLOAD_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+DOWNLOAD_USER_AGENT = build_filefy_user_agent()
 
 # In-memory state for resumable chunked uploads. Each entry maps an
 # upload-id (UUID) to a small dict describing the destination and the
@@ -209,7 +201,7 @@ def get_file_info(file_path):
             "name": os.path.basename(file_path),
             "path": file_path,
             "is_dir": is_dir,
-            "size": stat.st_size if not is_dir else get_dir_size(file_path),
+            "size": 0 if is_dir else stat.st_size,
             "size_formatted": format_size(stat.st_size) if not is_dir else "-",
             "modified": datetime.fromtimestamp(stat.st_mtime).strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -3549,7 +3541,7 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         host: Host to bind to (default: from config or 0.0.0.0)
         port: Port to listen on (default: from config or 5000)
         debug: Enable debug mode (default: False)
-        base_dir: Base directory for file management (default: user home)
+        base_dir: Base directory for file management (default: current directory)
         tunnel: When True (the default), publish a Cloudflare quick tunnel
                 and print its public URL alongside the local URL. Requires
                 the ``cloudflared`` binary; it is installed automatically
@@ -3564,7 +3556,6 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         details = get_details()
         host = host or settings.host
         port = port or settings.port
-        base_dir = base_dir or settings.root_directory
         app_name = details.app_name
         version = details.version or _PACKAGE_VERSION
     else:
@@ -3573,8 +3564,8 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         app_name = "Filefy"
         version = _PACKAGE_VERSION
 
-    if base_dir:
-        BASE_DIR = os.path.abspath(os.path.expanduser(base_dir))
+    BASE_DIR = resolve_base_dir(base_dir)
+    app.config["BASE_DIR"] = BASE_DIR
 
     # Determine the URL we should ask Cloudflare to publish. When the
     # server is bound to 0.0.0.0 the loopback address is the right
