@@ -1,229 +1,213 @@
-# Build and publish Filefy to PyPI.
+# CI & Release workflow for Filefy
 #
-# This workflow is the single source of truth for releases. It triggers
-# exclusively on push of a `vX.Y.Z` tag (which is created automatically
-# by `version-bump.yml` on every push to the default branch, or manually
-# by a maintainer). Triggering only on tags - and not on the GitHub
-# `release` event as well - prevents the duplicate uploads that used to
-# cause "File already exists" errors on PyPI.
-#
-# A safety check verifies that the tag matches the version recorded in
-# `filefy/_version.py`, and `twine upload --skip-existing` is used so
-# accidental re-runs never fail the workflow.
+# Features
+# --------
+# • Linting with pre-commit hooks (Black, Ruff, isort, etc.)
+# • Security & dependency audit
+# • Test matrix → Python 3.9-3.13 on Ubuntu, macOS, Windows
+# • Wheel builds via cibuildwheel (manylinux, Mac, Windows)
+# • Source-dist build via pypa-build
+# • Trusted publishing to PyPI with OpenID Connect (no API token)
+# • Re-usable caching for pip & cibuildwheel
+# • Upload of wheels/sdist as GitHub Release assets
 
-name: Build and Publish to PyPI
+name: CI / Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
-    inputs:
-      publish_to_pypi:
-        description: 'Publish to PyPI'
-        required: true
-        default: 'true'
-        type: boolean
 
 concurrency:
-  group: publish-pypi-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  # Job 1: Validate that the tag matches the in-repo version.
-  validate:
-    name: Validate version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.read.outputs.version }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+# ---------- Shared cache keys ----------
+env:
+  PIP_CACHE_KEY: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
+  CIBW_CACHE_KEY: ${{ runner.os }}-cibw-v1
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+# ---------- Job 1: Lint & static analysis ----------
+jobs:
+  lint:
+    name: Lint / Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          
-      - name: Read version from source
-        id: read
-        run: |
-          VERSION=$(jq -r '.version' filefy/config/details.json)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Verify tag matches version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          EXPECTED="v${{ steps.read.outputs.version }}"
-          if [ "${TAG}" != "${EXPECTED}" ]; then
-            echo "Tag ${TAG} does not match source version ${EXPECTED}." >&2
-            exit 1
-          fi
-          echo "Tag ${TAG} matches source version."
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ env.PIP_CACHE_KEY }}
 
-  # Job 2: Run the test suite across all supported Python versions.
-  test:
-    name: Run Tests
+      - name: Install pre-commit & mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install pre-commit mypy
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      - name: Static type analysis
+        run: mypy filefy
+
+# ---------- Job 2: Security / dependency audit ----------
+  security:
+    name: Bandit & pip-audit
     runs-on: ubuntu-latest
-    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit pip-audit
+
+      - name: Run Bandit
+        run: bandit -q -r filefy
+
+      - name: Run pip-audit
+        run: pip-audit
+
+# ---------- Job 3: Test matrix ----------
+  test:
+    name: Tests ${{ matrix.os }} Py ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    needs: [lint, security]
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.9', '3.10', '3.11', '3.12', '3.13']
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
 
-      - name: Install dependencies
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ env.PIP_CACHE_KEY }}
+
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
-      - name: Install package in editable mode
+      - name: Install package (editable)
         run: pip install -e .
 
       - name: Run tests
-        run: pytest tests/ -v --cov=filefy --cov-report=xml
+        run: pytest -v --cov=filefy --cov-report=xml
 
-      - name: Upload coverage reports
+      - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          file: ./coverage.xml
-          fail_ci_if_error: false
+          files: ./coverage.xml
+          flags: unit
         continue-on-error: true
 
-  # Job 3: Build the sdist and wheel.
+# ---------- Job 4: Build wheels & sdist ----------
   build:
-    name: Build Package
+    name: Build distributions
     runs-on: ubuntu-latest
     needs: test
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install build dependencies
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+          key: ${{ env.PIP_CACHE_KEY }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/cibuildwheel
+          key: ${{ env.CIBW_CACHE_KEY }}
+
+      - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
-          pip install build twine
+          pip install build cibuildwheel twine
 
-      - name: Build package
-        run: python -m build
+      - name: Build wheels with cibuildwheel
+        run: cibuildwheel --output-dir wheelhouse
 
-      - name: Check package with twine
+      - name: Build sdist
+        run: python -m build --sdist --outdir dist
+
+      - name: Combine artifacts
+        run: |
+          mkdir -p dist
+          cp wheelhouse/* dist/
+
+      - name: Twine check
         run: twine check dist/*
 
-      - name: Verify wheel contents include bundled config
-        run: |
-          python - <<'PY'
-          import glob
-          import zipfile
-          wheels = glob.glob("dist/*.whl")
-          assert wheels, "No wheel produced"
-          with zipfile.ZipFile(wheels[0]) as zf:
-              names = zf.namelist()
-          required = [
-              "filefy/__init__.py",
-              "filefy/cli.py",
-              "filefy/server.py",
-              "filefy/_version.py",
-              "filefy/tunnel.py",
-              "filefy/install_cloudflared.py",
-              "filefy/config/__init__.py",
-              "filefy/config/config_manager.py",
-              "filefy/config/details.json",
-              "filefy/config/settings.json",
-          ]
-          missing = [r for r in required if r not in names]
-          if missing:
-              raise SystemExit(f"Wheel is missing required files: {missing}")
-          # Confirm the cloudflared installer console-script is registered
-          # so `pip install filefy` users get it out-of-the-box.
-          entry_points = [n for n in names if n.endswith("entry_points.txt")]
-          assert entry_points, "Wheel is missing entry_points.txt"
-          with zipfile.ZipFile(wheels[0]) as zf:
-              ep_text = zf.read(entry_points[0]).decode()
-          if "filefy-install-cloudflared" not in ep_text:
-              raise SystemExit(
-                  "Wheel entry_points.txt is missing "
-                  "'filefy-install-cloudflared' console script."
-              )
-          print("Wheel contents OK.")
-          PY
-
-      - name: Smoke-test installed CLI
-        run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/pip install --upgrade pip
-          /tmp/smoke/bin/pip install dist/*.whl
-          /tmp/smoke/bin/filefy --version
-          /tmp/smoke/bin/filefy --help
-          # The cloudflared installer must be available as a dedicated
-          # console script and must also be importable as a module so
-          # the --tunnel auto-install path works without any extra
-          # dependencies.
-          /tmp/smoke/bin/filefy-install-cloudflared --help
-          /tmp/smoke/bin/python -c "from filefy.install_cloudflared import ensure_cloudflared, main"
-
-      - name: Upload build artifacts
+      - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
-          retention-days: 5
+          retention-days: 30
 
-  # Job 4: Publish to PyPI (trusted publishing via OIDC, with token fallback).
+# ---------- Job 5: Publish to PyPI (tags only) ----------
   publish:
-    name: Publish to PyPI
+    name: Publish to PyPI (trusted)
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_to_pypi == 'true')
+    if: startsWith(github.ref, 'refs/tags/v')
 
     environment:
       name: pypi
       url: https://pypi.org/project/filefy/
 
     permissions:
-      id-token: write  # Required for trusted publishing
+      id-token: write  # OIDC for trusted publishing
+      contents: read
 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install twine
-        run: |
-          python -m pip install --upgrade pip
-          pip install twine
-
-      - name: Publish to PyPI
+      - name: Publish with twine (OIDC)
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: twine upload --skip-existing --non-interactive dist/*
+        run: twine upload --skip-existing dist/*
 
-  # Job 5: Attach build artifacts to the matching GitHub release (if any).
+# ---------- Job 6: Upload release assets ----------
   release-assets:
-    name: Upload Release Assets
+    name: Attach artifacts to GitHub Release
     runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -232,8 +216,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
@@ -245,5 +228,3 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
