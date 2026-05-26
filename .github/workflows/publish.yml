@@ -11,10 +11,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-# Hash of dependency-defining files – reused across jobs
-env:
-  PIP_FILES_HASH: ${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
-
 # ──────────────────────────────────────────────────────────────
 jobs:
   # 1. Linting & static analysis
@@ -32,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
 
       - name: Install tooling
         run: |
@@ -89,7 +85,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
 
       - name: Install deps
         run: |
@@ -126,7 +122,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
 
       - name: Cache cibuildwheel
         uses: actions/cache@v4
