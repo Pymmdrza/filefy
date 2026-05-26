@@ -1,17 +1,4 @@
-# CI & Release workflow for Filefy
-#
-# Features
-# --------
-# • Linting with pre-commit hooks (Black, Ruff, isort, etc.)
-# • Security & dependency audit
-# • Test matrix → Python 3.9-3.13 on Ubuntu, macOS, Windows
-# • Wheel builds via cibuildwheel (manylinux, Mac, Windows)
-# • Source-dist build via pypa-build
-# • Trusted publishing to PyPI with OpenID Connect (no API token)
-# • Re-usable caching for pip & cibuildwheel
-# • Upload of wheels/sdist as GitHub Release assets
-
-name: Build and Push to PyPi
+name: CI / Release
 
 on:
   push:
@@ -24,13 +11,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-# ---------- Shared cache keys ----------
+# Hash of dependency-defining files – reused across jobs
 env:
-  PIP_CACHE_KEY: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
-  CIBW_CACHE_KEY: ${{ runner.os }}-cibw-v1
+  PIP_FILES_HASH: ${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
 
-# ---------- Job 1: Lint & static analysis ----------
+# ──────────────────────────────────────────────────────────────
 jobs:
+  # 1. Linting & static analysis
   lint:
     name: Lint / Typecheck
     runs-on: ubuntu-latest
@@ -41,13 +28,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - uses: actions/cache@v4
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-          key: ${{ env.PIP_CACHE_KEY }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
 
-      - name: Install pre-commit & mypy
+      - name: Install tooling
         run: |
           python -m pip install --upgrade pip
           pip install pre-commit mypy
@@ -58,7 +45,7 @@ jobs:
       - name: Static type analysis
         run: mypy filefy
 
-# ---------- Job 2: Security / dependency audit ----------
+  # 2. Security & dependency audit
   security:
     name: Bandit & pip-audit
     runs-on: ubuntu-latest
@@ -80,7 +67,7 @@ jobs:
       - name: Run pip-audit
         run: pip-audit
 
-# ---------- Job 3: Test matrix ----------
+  # 3. Test matrix
   test:
     name: Tests ${{ matrix.os }} Py ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
@@ -98,11 +85,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - uses: actions/cache@v4
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-          key: ${{ env.PIP_CACHE_KEY }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
 
       - name: Install deps
         run: |
@@ -110,25 +97,24 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
-      - name: Install package (editable)
+      - name: Install package
         run: pip install -e .
 
       - name: Run tests
         run: pytest -v --cov=filefy --cov-report=xml
 
-      - name: Upload coverage to Codecov
+      - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
           flags: unit
         continue-on-error: true
 
-# ---------- Job 4: Build wheels & sdist ----------
+  # 4. Build distributions (wheels + sdist)
   build:
     name: Build distributions
     runs-on: ubuntu-latest
     needs: test
-
     steps:
       - uses: actions/checkout@v4
 
@@ -136,25 +122,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      - uses: actions/cache@v4
+      - name: Cache pip
+        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-          key: ${{ env.PIP_CACHE_KEY }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ env.PIP_FILES_HASH }}
 
-      - uses: actions/cache@v4
+      - name: Cache cibuildwheel
+        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/cibuildwheel
-          key: ${{ env.CIBW_CACHE_KEY }}
+          path: ~/.cache/cibuildwheel
+          key: ${{ runner.os }}-cibw-v1
 
       - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
           pip install build cibuildwheel twine
 
-      - name: Build wheels with cibuildwheel
+      - name: Build wheels (all platforms)
         run: cibuildwheel --output-dir wheelhouse
 
       - name: Build sdist
@@ -168,28 +153,25 @@ jobs:
       - name: Twine check
         run: twine check dist/*
 
-      - name: Upload dist artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
           retention-days: 30
 
-# ---------- Job 5: Publish to PyPI (tags only) ----------
+  # 5. Publish to PyPI (tags only, trusted publishing)
   publish:
     name: Publish to PyPI (trusted)
     runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-
     environment:
       name: pypi
       url: https://pypi.org/project/filefy/
-
     permissions:
-      id-token: write  # OIDC for trusted publishing
+      id-token: write   # OIDC
       contents: read
-
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -205,16 +187,14 @@ jobs:
           TWINE_USERNAME: __token__
         run: twine upload --skip-existing dist/*
 
-# ---------- Job 6: Upload release assets ----------
+  # 6. Attach artifacts to GitHub Release (tags only)
   release-assets:
     name: Attach artifacts to GitHub Release
     runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-
     permissions:
       contents: write
-
     steps:
       - uses: actions/download-artifact@v4
         with:
