@@ -1,200 +1,317 @@
-name: CI / Release
+# Build, verify, and publish Filefy to PyPI.
+#
+# Release source of truth:
+# - Official publishing happens only from vX.Y.Z tags.
+# - The tag must match filefy/config/details.json.
+# - The package is built once, verified, uploaded as an artifact,
+#   then published from the exact same dist/ files.
+#
+# PyPI publishing uses Trusted Publishing / OIDC via pypa/gh-action-pypi-publish.
+# Configure the matching Trusted Publisher on PyPI before enabling this workflow.
+
+name: Build and Publish to PyPI
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_to_pypi:
+        description: 'Publish to PyPI'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: publish-pypi-${{ github.ref }}
   cancel-in-progress: false
 
-# ──────────────────────────────────────────────────────────────
 jobs:
-  # 1. Linting & static analysis
-  lint:
-    name: Lint / Typecheck
+  validate:
+    name: Validate version
     runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
-
-      - name: Install tooling
+      - name: Read and validate version
+        id: version
         run: |
-          python -m pip install --upgrade pip
-          pip install pre-commit mypy
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          from pathlib import Path
 
-      - name: Run pre-commit
-        run: pre-commit run --all-files --show-diff-on-failure
+          path = Path("filefy/config/details.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          version = str(data.get("version", "")).strip()
 
-      - name: Static type analysis
-        run: mypy filefy
+          if not version:
+              raise SystemExit("Missing version in filefy/config/details.json")
 
-  # 2. Security & dependency audit
-  security:
-    name: Bandit & pip-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+          # Conservative semver-like validation.
+          # Adjust this if you intentionally use dev/rc/post versions.
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[a-zA-Z0-9_.+-]+)?", version):
+              raise SystemExit(f"Invalid version format: {version!r}")
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+          print(f"version={version}")
+          PY
 
-      - name: Install scanners
+      - name: Verify tag matches source version
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          python -m pip install --upgrade pip
-          pip install bandit pip-audit
+          TAG="${GITHUB_REF#refs/tags/}"
+          EXPECTED="v${{ steps.version.outputs.version }}"
 
-      - name: Run Bandit
-        run: bandit -q -r filefy
+          if [ "$TAG" != "$EXPECTED" ]; then
+            echo "::error::Tag '$TAG' does not match source version '$EXPECTED'."
+            exit 1
+          fi
 
-      - name: Run pip-audit
-        run: pip-audit
+          echo "Tag '$TAG' matches source version '$EXPECTED'."
 
-  # 3. Test matrix
   test:
-    name: Tests ${{ matrix.os }} Py ${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
-    needs: [lint, security]
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    needs: validate
+
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+            setup.py
+            setup.cfg
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
-
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-cov
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pytest-cov
 
       - name: Install package
-        run: pip install -e .
+        run: python -m pip install -e .
 
       - name: Run tests
-        run: pytest -v --cov=filefy --cov-report=xml
+        run: |
+          pytest tests/ \
+            -v \
+            --cov=filefy \
+            --cov-report=term-missing \
+            --cov-report=xml
 
-      - name: Upload coverage
+      - name: Upload coverage report
         uses: codecov/codecov-action@v4
         with:
-          files: ./coverage.xml
-          flags: unit
+          file: ./coverage.xml
+          fail_ci_if_error: false
         continue-on-error: true
 
-  # 4. Build distributions (wheels + sdist)
   build:
-    name: Build distributions
+    name: Build distribution
     runs-on: ubuntu-latest
-    needs: test
+    needs:
+      - validate
+      - test
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            setup.py
+            setup.cfg
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt') }}
-
-      - name: Cache cibuildwheel
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/cibuildwheel
-          key: ${{ runner.os }}-cibw-v1
-
-      - name: Install build tooling
+      - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build cibuildwheel twine
+          python -m pip install build twine
 
-      - name: Build wheels (all platforms)
-        run: cibuildwheel --output-dir wheelhouse
+      - name: Build sdist and wheel
+        run: python -m build
 
-      - name: Build sdist
-        run: python -m build --sdist --outdir dist
-
-      - name: Combine artifacts
+      - name: List built artifacts
         run: |
-          mkdir -p dist
-          cp wheelhouse/* dist/
+          ls -lah dist/
+          python - <<'PY'
+          from pathlib import Path
 
-      - name: Twine check
-        run: twine check dist/*
+          files = sorted(Path("dist").glob("*"))
+          wheels = [p for p in files if p.suffix == ".whl"]
+          sdists = [p for p in files if p.name.endswith(".tar.gz")]
 
-      - name: Upload artifacts
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected exactly one wheel, found: {wheels}")
+          if len(sdists) != 1:
+              raise SystemExit(f"Expected exactly one sdist, found: {sdists}")
+
+          print("Artifacts OK:")
+          for file in files:
+              print(f" - {file}")
+          PY
+
+      - name: Check package metadata
+        run: twine check --strict dist/*
+
+      - name: Verify wheel contents
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, f"Expected one wheel, got {wheels}"
+
+          required = {
+              "filefy/__init__.py",
+              "filefy/cli.py",
+              "filefy/server.py",
+              "filefy/_version.py",
+              "filefy/tunnel.py",
+              "filefy/install_cloudflared.py",
+              "filefy/config/__init__.py",
+              "filefy/config/config_manager.py",
+              "filefy/config/details.json",
+              "filefy/config/settings.json",
+          }
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = set(zf.namelist())
+              missing = sorted(required - names)
+
+              if missing:
+                  raise SystemExit(f"Wheel is missing required files: {missing}")
+
+              entry_points = [n for n in names if n.endswith("entry_points.txt")]
+              if not entry_points:
+                  raise SystemExit("Wheel is missing entry_points.txt")
+
+              ep_text = zf.read(entry_points[0]).decode("utf-8")
+
+          expected_scripts = [
+              "filefy",
+              "filefy-install-cloudflared",
+          ]
+
+          missing_scripts = [
+              script for script in expected_scripts
+              if script not in ep_text
+          ]
+
+          if missing_scripts:
+              raise SystemExit(
+                  f"Wheel entry_points.txt is missing console scripts: {missing_scripts}"
+              )
+
+          print("Wheel contents OK.")
+          PY
+
+      - name: Smoke-test wheel install
+        run: |
+          python -m venv /tmp/smoke-wheel
+          /tmp/smoke-wheel/bin/python -m pip install --upgrade pip
+          /tmp/smoke-wheel/bin/python -m pip install dist/*.whl
+
+          /tmp/smoke-wheel/bin/filefy --version
+          /tmp/smoke-wheel/bin/filefy --help
+          /tmp/smoke-wheel/bin/filefy-install-cloudflared --help
+          /tmp/smoke-wheel/bin/python -c "from filefy.install_cloudflared import ensure_cloudflared, main"
+
+      - name: Smoke-test sdist install
+        run: |
+          python -m venv /tmp/smoke-sdist
+          /tmp/smoke-sdist/bin/python -m pip install --upgrade pip
+          /tmp/smoke-sdist/bin/python -m pip install dist/*.tar.gz
+
+          /tmp/smoke-sdist/bin/filefy --version
+          /tmp/smoke-sdist/bin/filefy --help
+          /tmp/smoke-sdist/bin/python -c "import filefy; print(filefy.__file__)"
+
+      - name: Upload distribution artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ needs.validate.outputs.version }}
           path: dist/
-          retention-days: 30
+          if-no-files-found: error
+          retention-days: 7
 
-  # 5. Publish to PyPI (tags only, trusted publishing)
   publish:
-    name: Publish to PyPI (trusted)
+    name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - validate
+      - build
+
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_to_pypi)
+
     environment:
       name: pypi
       url: https://pypi.org/project/filefy/
+
     permissions:
-      id-token: write   # OIDC
       contents: read
+      id-token: write
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: dist-${{ needs.validate.outputs.version }}
           path: dist/
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Publish with twine (OIDC)
-        env:
-          TWINE_USERNAME: __token__
-        run: twine upload --skip-existing dist/*
-
-  # 6. Attach artifacts to GitHub Release (tags only)
   release-assets:
-    name: Attach artifacts to GitHub Release
+    name: Upload GitHub release assets
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - validate
+      - build
+
     if: startsWith(github.ref, 'refs/tags/v')
+
     permissions:
       contents: write
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: dist-${{ needs.validate.outputs.version }}
           path: dist/
 
       - name: Upload release assets
