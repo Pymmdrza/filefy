@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   bump:
-    name: Bump version and create release tag
+    name: Bump version, create tag, and publish release
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip ci]')
 
@@ -121,3 +121,39 @@ jobs:
           TAG="${{ steps.bump.outputs.tag }}"
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.tag }}
+          name: Filefy ${{ steps.bump.outputs.tag }}
+          target_commitish: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          token: ${{ secrets.RELEASE_TOKEN }}
+          body: |
+            ## Filefy ${{ steps.bump.outputs.tag }}
+
+            This release was created automatically after the version bump to `${{ steps.bump.outputs.new_version }}`.
+
+            ### Install or upgrade
+
+            ```bash
+            pip install --upgrade filefy==${{ steps.bump.outputs.new_version }}
+            ```
+
+            ### What is included
+
+            - A signed Git tag for this release.
+            - Automatically generated release notes from merged pull requests and commits.
+            - Python wheel and source distribution assets after the CI / Release workflow finishes.
+
+            ### Helpful links
+
+            - Documentation: https://filefy.readthedocs.io/en/latest/
+            - Package: https://pypi.org/project/filefy/
+            - Issues: https://github.com/Pymmdrza/filefy/issues
+
+            Please review the generated notes below before upgrading production deployments.
