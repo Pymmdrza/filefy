@@ -212,7 +212,7 @@ def get_file_info(file_path):
             "name": os.path.basename(file_path),
             "path": file_path,
             "is_dir": is_dir,
-            "size": stat.st_size if not is_dir else get_dir_size(file_path),
+            "size": 0 if is_dir else stat.st_size,
             "size_formatted": format_size(stat.st_size) if not is_dir else "-",
             "modified": datetime.fromtimestamp(stat.st_mtime).strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -3552,7 +3552,7 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         host: Host to bind to (default: from config or 0.0.0.0)
         port: Port to listen on (default: from config or 5000)
         debug: Enable debug mode (default: False)
-        base_dir: Base directory for file management (default: user home)
+        base_dir: Base directory for file management (default: current directory)
         tunnel: When True (the default), publish a Cloudflare quick tunnel
                 and print its public URL alongside the local URL. Requires
                 the ``cloudflared`` binary; it is installed automatically
@@ -3567,8 +3567,6 @@ def run(host=None, port=None, debug=False, base_dir=None, tunnel=True):
         details = get_details()
         host = host or settings.host
         port = port or settings.port
-        if base_dir is None:
-            base_dir = settings.root_directory
         app_name = details.app_name
         version = details.version or _PACKAGE_VERSION
     else:

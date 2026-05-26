@@ -66,9 +66,11 @@ filefy --host 127.0.0.1 --port 3000
 # Enable debug mode
 filefy --debug
 
-# Also expose the server on a public Cloudflare tunnel
-# (install cloudflared first: https://github.com/cloudflare/cloudflared)
+# Explicitly enable the public Cloudflare tunnel (enabled by default)
 filefy --tunnel
+
+# Run only on the local/private URL and skip the Cloudflare tunnel
+filefy --no-tunnel
 ```
 
 Then open your browser and go to: **http://localhost:5000**
@@ -145,20 +147,25 @@ docker run --rm -p 5000:5000 -v "$PWD/data:/data" filefy:local
 ## CLI Usage
 
 ```
-usage: filefy [-h] [-H HOST] [-p PORT] [-d DIR] [--debug] [--tunnel] [-v]
+usage: filefy [-h] [-H HOST] [-p PORT] [-d DIRECTORY] [--debug]
+              [--tunnel | --no-tunnel] [--install-cloudflared] [-v]
 
 filefy - Professional Web-Based File Manager
 
 options:
   -h, --help            show this help message and exit
-  -H, --host HOST       Host to bind the server to (default: 0.0.0.0)
-  -p, --port PORT       Port to run the server on (default: 5000)
-  -d, --dir DIR         Base directory for file management (default: current
+  -H HOST, --host HOST  Host to bind the server to (default: 0.0.0.0)
+  -p PORT, --port PORT  Port to run the server on (default: 5000)
+  -d DIRECTORY, --dir DIRECTORY, --directory DIRECTORY
+                        Base directory for file management (default: current
                         directory)
   --debug               Enable Flask debug mode
-  --tunnel              Also publish the server through a Cloudflare quick
-                        tunnel and print the public URL alongside the local
-                        URL. Requires the 'cloudflared' binary on PATH.
+  --tunnel              Enable the automatic Cloudflare quick tunnel. This is
+                        the default unless --no-tunnel is used.
+  --no-tunnel           Disable the automatic Cloudflare quick tunnel.
+  --install-cloudflared
+                        Install the 'cloudflared' binary for the current
+                        operating system and exit.
   -v, --version         show program's version number and exit
 
 Examples:
@@ -168,6 +175,7 @@ Examples:
   filefy -d /home/user/files     Set base directory
   filefy --debug                 Enable Flask debug mode
   filefy --tunnel                Also expose a public Cloudflare URL
+  filefy --no-tunnel             Disable public Cloudflare tunnel startup
 ```
 
 ## Python API
