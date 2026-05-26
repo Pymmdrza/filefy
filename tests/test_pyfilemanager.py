@@ -4,6 +4,7 @@ Tests for filefy
 
 import pytest
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -35,6 +36,50 @@ class TestPackageImports:
         assert callable(main)
 
 
+class TestCLI:
+    """Test command-line startup behavior."""
+
+    def test_cli_defaults_to_current_directory_marker(self, monkeypatch):
+        """The CLI should let the server resolve the launch cwd."""
+        import filefy.server as server
+
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(sys, "argv", ["filefy", "--no-tunnel"])
+        monkeypatch.setattr(server, "run", fake_run)
+
+        from filefy.cli import main
+
+        main()
+
+        assert captured["base_dir"] is None
+        assert captured["tunnel"] is False
+
+    def test_cli_accepts_custom_directory_and_tunnel_flags(self, monkeypatch):
+        """README CLI examples should be accepted by the parser."""
+        import filefy.server as server
+
+        captured = {}
+
+        def fake_run(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(
+            sys, "argv", ["filefy", "--dir", "/tmp", "--tunnel"]
+        )
+        monkeypatch.setattr(server, "run", fake_run)
+
+        from filefy.cli import main
+
+        main()
+
+        assert captured["base_dir"] == "/tmp"
+        assert captured["tunnel"] is True
+
+
 class TestFlaskApp:
     """Test Flask application"""
 
@@ -52,7 +97,16 @@ class TestFlaskApp:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             app = create_app(base_dir=tmpdir)
-            assert app.config["BASE_DIR"] == tmpdir
+            assert app.config["BASE_DIR"] == os.path.abspath(tmpdir)
+
+    def test_app_defaults_to_current_directory(self, monkeypatch):
+        """Test app creation defaults to the current working directory."""
+        from filefy import create_app
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.chdir(tmpdir)
+            app = create_app()
+            assert app.config["BASE_DIR"] == os.path.abspath(tmpdir)
 
     def test_app_routes_exist(self):
         """Test that main routes exist"""
@@ -98,6 +152,28 @@ class TestAPIEndpoints:
         """Test browsing non-existent path"""
         response = client.get("/api/browse?path=/nonexistent/path/12345")
         assert response.status_code == 404
+
+    def test_browse_does_not_calculate_recursive_directory_sizes(
+        self, client, monkeypatch
+    ):
+        """Directory listings should not recurse into every child directory."""
+        import filefy.server as server
+
+        def fail_if_called(path):
+            raise AssertionError(f"Unexpected recursive size scan for {path}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "child").mkdir()
+            monkeypatch.setattr(server, "get_dir_size", fail_if_called)
+
+            response = client.get(f"/api/browse?path={tmpdir}")
+
+        assert response.status_code == 200
+        data = response.get_json()
+        child = next(item for item in data["items"] if item["name"] == "child")
+        assert child["is_dir"] is True
+        assert child["size"] == 0
+        assert child["size_formatted"] == "-"
 
     def test_disk_usage(self, client):
         """Test disk usage endpoint"""
@@ -381,6 +457,51 @@ class TestServerInfoAndTunnelParser:
         assert extract_tunnel_url("nothing here") is None
         assert extract_tunnel_url("") is None
         assert extract_tunnel_url(None) is None
+
+    def test_run_defaults_to_current_directory(self, monkeypatch):
+        import filefy.server as server
+
+        original_base_dir = server.BASE_DIR
+        with tempfile.TemporaryDirectory() as tmpdir:
+            monkeypatch.chdir(tmpdir)
+            monkeypatch.setattr(server.app, "run", lambda **kwargs: None)
+
+            try:
+                server.run(
+                    host="127.0.0.1",
+                    port=54321,
+                    debug=False,
+                    base_dir=None,
+                    tunnel=False,
+                )
+                assert server.BASE_DIR == os.path.abspath(tmpdir)
+                assert server.app.config["BASE_DIR"] == os.path.abspath(tmpdir)
+            finally:
+                server.BASE_DIR = original_base_dir
+                server.app.config["BASE_DIR"] = original_base_dir
+
+    def test_run_uses_explicit_base_directory(self, monkeypatch):
+        import filefy.server as server
+
+        original_base_dir = server.BASE_DIR
+        with tempfile.TemporaryDirectory() as cwd:
+            with tempfile.TemporaryDirectory() as target:
+                monkeypatch.chdir(cwd)
+                monkeypatch.setattr(server.app, "run", lambda **kwargs: None)
+
+                try:
+                    server.run(
+                        host="127.0.0.1",
+                        port=54321,
+                        debug=False,
+                        base_dir=target,
+                        tunnel=False,
+                    )
+                    assert server.BASE_DIR == os.path.abspath(target)
+                    assert server.app.config["BASE_DIR"] == os.path.abspath(target)
+                finally:
+                    server.BASE_DIR = original_base_dir
+                    server.app.config["BASE_DIR"] = original_base_dir
 
 
 class TestCompressEndpoint:
